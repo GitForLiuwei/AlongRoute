@@ -1,0 +1,37 @@
+from fastapi.testclient import TestClient
+from app.main import app
+
+
+def test_health_and_config(monkeypatch):
+    monkeypatch.delenv('AMAP_WEB_SERVICE_KEY', raising=False)
+    client = TestClient(app)
+    assert client.get('/api/health').json()['status'] == 'ok'
+    assert client.get('/api/config').json()['mode'] == 'demo'
+
+
+def test_recommend_http(monkeypatch):
+    monkeypatch.delenv('AMAP_WEB_SERVICE_KEY', raising=False)
+    client = TestClient(app)
+    payload = {
+        'origin': {'name': 'A', 'point': {'lon': 113.3245, 'lat': 23.1065}, 'citycode': '020'},
+        'driver_destination': {'name': 'B', 'point': {'lon': 113.3279, 'lat': 23.1370}, 'citycode': '020'},
+        'passenger_destination': {'name': 'C', 'point': {'lon': 113.269, 'lat': 22.989}, 'citycode': '020'},
+        'preferences': {'max_detour_minutes': 3, 'modes': ['taxi', 'transit'], 'priority': 'balanced'}
+    }
+    response = client.post('/api/recommend', json=payload)
+    assert response.status_code == 200
+    results = response.json()
+    assert results['mode'] == 'demo'
+    assert len(results['recommendations']) == 2
+    assert all(x['stop_status'] == 'unverified' for x in results['recommendations'])
+
+
+def test_rejects_invalid_point(monkeypatch):
+    monkeypatch.delenv('AMAP_WEB_SERVICE_KEY', raising=False)
+    client = TestClient(app)
+    response = client.post('/api/recommend', json={
+        'origin': {'name': 'A', 'point': {'lon': 999, 'lat': 23}},
+        'driver_destination': {'name': 'B', 'point': {'lon': 114, 'lat': 23}},
+        'passenger_destination': {'name': 'C', 'point': {'lon': 115, 'lat': 23}}
+    })
+    assert response.status_code == 422

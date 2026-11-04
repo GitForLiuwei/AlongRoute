@@ -1,0 +1,291 @@
+import asyncio
+from datetime import datetime, timezone
+
+import httpx
+import pytest
+
+from app.amap import AmapClient, MapServiceError, calculate_live
+from app.candidates import Candidate, Station, build_candidates, restricted_road, terminal_is_usable
+from app.geometry import haversine_m
+from app.models import (ModeOption, Place, Point, Preferences, Recommendation,
+                        RecommendationRequest, RoadSegment, Route)
+from app.optimizer import is_viable, rank_recommendations, option_score
+from app.transit import coordinates
+
+
+A = Point(lon=113.3, lat=23.1)
+P = Point(lon=113.31, lat=23.1)
+B = Point(lon=113.32, lat=23.1)
+C = Point(lon=113.33, lat=23.1)
+STOP = Point(lon=113.311, lat=23.1)
+
+
+def itinerary(duration=600, walking=200, transfers=0, kind="公交线路", entrance=True, fee=2):
+    segments = []
+    for index in range(transfers + 1):
+        departure = {"name": f"Station {index}", "location": STOP.csv()}
+        if entrance:
+            departure["entrance"] = {"name": "A口", "location": STOP.csv()}
+        segments.append({"walking": {"distance": str(min(walking, 200)), "cost": {"duration": "100"}, "steps": []},
+                         "bus": {"buslines": [{"name": "Line", "type": kind,
+                                                "departure_stop": departure,
+                                                "polyline": {"polyline": f"{STOP.csv()};{C.csv()}"}}]}})
+    return {"cost": {"duration": str(duration), "transit_fee": str(fee)},
+            "walking_distance": str(walking), "segments": segments}
+
+
+def run_transit(monkeypatch, items, access=200):
+    async def fake_get(self, path, **params):
+        return {"route": {"transits": items}}
+
+    async def walking(self, origin, destination):
+        assert destination == STOP  # The selected itinerary's stop, not any nearby POI.
+        return None if access is None else Route(duration_s=100, distance_m=access,
+                                                 polyline=[origin, destination])
+
+    monkeypatch.setattr(AmapClient, "get", fake_get)
+    monkeypatch.setattr(AmapClient, "walking", walking)
+
+    async def query():
+        async with httpx.AsyncClient() as client:
+            return await AmapClient("test-key", client).transit(
+                Place(name="P", point=P, citycode="020"), Place(name="C", point=C, citycode="020"),
+                datetime(2026, 11, 4, 8, tzinfo=timezone.utc), Preferences())
+
+    return asyncio.run(query())
+
+
+@pytest.mark.parametrize("distance,accepted", [(299, True), (300, True), (301, False), (None, False)])
+def test_actual_station_walking_boundary(monkeypatch, distance, accepted):
+    options = run_transit(monkeypatch, [itinerary()], access=distance)
+    assert bool(options) is accepted
+    if options:
+        assert options[0].boarding_walk_m == distance
+
+
+def test_constraints_apply_before_fastest_itinerary_selection(monkeypatch):
+    options = run_transit(monkeypatch, [itinerary(duration=300, walking=1400),
+                                       itinerary(duration=400, transfers=3),
+                                       itinerary(duration=700, walking=500)])
+    assert [option.duration_s for option in options] == [700]
+
+
+def test_unknown_or_missing_metro_entrance_is_rejected(monkeypatch):
+    assert run_transit(monkeypatch, [itinerary(kind="地铁线路", entrance=False)]) == []
+    options = run_transit(monkeypatch, [itinerary(kind="地铁线路")])
+    assert options[0].boarding_kind == "subway"
+    assert options[0].boarding_stop.name.endswith("A口")
+
+
+def test_nearby_unrelated_station_does_not_satisfy_access_limit(monkeypatch):
+    far = itinerary()
+    far["segments"][0]["bus"]["buslines"][0]["departure_stop"]["location"] = C.csv()
+    assert run_transit(monkeypatch, [far]) == []
+
+
+def test_bus_platform_itself_is_not_a_private_car_dropoff(monkeypatch):
+    item = itinerary()
+    item["segments"][0]["bus"]["buslines"][0]["departure_stop"]["location"] = P.csv()
+    # Straight distance is zero; the platform must be rejected regardless of a
+    # synthetic routing result that makes its walk appear longer.
+    async def get(self, path, **params):
+        return {"route": {"transits": [item]}}
+    async def walking(self, origin, destination):
+        return Route(duration_s=0, distance_m=0, polyline=[origin, destination])
+    monkeypatch.setattr(AmapClient, "get", get)
+    monkeypatch.setattr(AmapClient, "walking", walking)
+    async def query():
+        async with httpx.AsyncClient() as client:
+            return await AmapClient("test-key", client).transit(
+                Place(name="P", point=P, citycode="020"), Place(name="C", point=C, citycode="020"),
+                datetime.now(timezone.utc), Preferences())
+    assert asyncio.run(query()) == []
+
+
+def test_nested_provider_geometry_is_preserved():
+    assert coordinates({"polyline": f"{P.csv()};{STOP.csv()}"}) == [P, STOP]
+
+
+def rec(identifier, ride, onward, fee=10):
+    return Recommendation(id=identifier, point=Place(name=identifier, point=P),
+                          driver_detour_s=90, shared_ride_s=ride, driver_route=Route(duration_s=600, distance_m=1000),
+                          options=[ModeOption(mode="taxi", duration_s=onward, fare_yuan=fee, details="test")],
+                          suggested_mode="taxi", score=0, reason="test")
+
+
+def test_ranking_counts_the_shared_ride_and_stop_time():
+    late = rec("late", ride=1800, onward=300)
+    early = rec("early", ride=300, onward=900)
+    ranked = rank_recommendations([late, early], Preferences(priority="time"))
+    assert ranked[0].id == "early"
+    assert ranked[0].options[0].total_duration_s == 1290
+
+
+def test_unknown_transit_access_cannot_survive_ranking():
+    option = ModeOption(mode="transit", duration_s=300, walking_m=200, transfers=0, details="test")
+    assert not is_viable(option, Preferences())
+
+
+def test_cost_preference_can_choose_a_slower_transit_alternative(monkeypatch):
+    options = run_transit(monkeypatch, [itinerary(duration=600, fee=15), itinerary(duration=900, fee=2)])
+    recommendation = rec("choice", ride=300, onward=0)
+    recommendation.options = options
+    ranked = rank_recommendations([recommendation], Preferences(priority="cost", modes=["transit"]))
+    chosen = min(ranked[0].options, key=lambda option: option_score(option, 'cost'))
+    assert chosen.duration_s == 900
+    assert chosen.fare_yuan == 2
+
+
+def test_walking_verification_does_not_accept_remote_map_snaps(monkeypatch):
+    async def get(self, path, **params):
+        assert path == "/v5/direction/walking"
+        return {"route": {"paths": [{"distance": "100", "cost": {"duration": "100"},
+                                     "steps": [{"polyline": {"polyline": f"{A.csv()};{STOP.csv()}"}}]}]}}
+    monkeypatch.setattr(AmapClient, "get", get)
+    async def query():
+        async with httpx.AsyncClient() as client:
+            return await AmapClient("test-key", client).walking(P, STOP)
+    assert asyncio.run(query()) is None
+
+
+def test_candidate_search_expands_to_roads_and_retains_route_coverage():
+    route = Route(duration_s=600, distance_m=2000, polyline=[A, B])
+    request = RecommendationRequest(origin=Place(name="A", point=A), driver_destination=Place(name="B", point=B),
+                                    passenger_destination=Place(name="C", point=C), preferences=Preferences(modes=["taxi"]))
+    candidates = build_candidates(route, [], [], request)
+    assert len(candidates) > 3
+    assert all(candidate.source == "roadside" for candidate in candidates)
+    assert any(candidate.progress_m < 400 for candidate in candidates)
+    assert any(candidate.progress_m > 1600 for candidate in candidates)
+
+
+def test_candidate_search_avoids_known_bus_platform_buffer():
+    route = Route(duration_s=600, distance_m=2000, polyline=[A, B])
+    request = RecommendationRequest(origin=Place(name="A", point=A), driver_destination=Place(name="B", point=B),
+                                    passenger_destination=Place(name="C", point=C), preferences=Preferences(modes=["transit"]))
+    candidates = build_candidates(route, [], [Station(Place(name="Bus", point=P), "bus")], request)
+    assert candidates
+    assert all(haversine_m(candidate.place.point, P) > 30 for candidate in candidates)
+    assert any(candidate.station_distance_m <= 300 for candidate in candidates)  # Final itineraries enforce 300m, not POI centers.
+
+
+def test_highways_and_remote_road_snaps_are_rejected():
+    assert restricted_road("机场高速")
+    assert restricted_road("城市快速路")
+    assert not restricted_road("城市快速路辅路")
+    road = Route(duration_s=50, distance_m=100, polyline=[A, P],
+                 segments=[RoadSegment(name="机场高速", polyline=[A, P])])
+    assert not terminal_is_usable(road, P, True)
+    road.segments[0].name = "普通道路"
+    assert terminal_is_usable(road, P, True)
+    assert not terminal_is_usable(road, C, True)
+
+
+def test_transit_failure_keeps_a_valid_taxi_and_full_trip_time(monkeypatch):
+    request = RecommendationRequest(origin=Place(name="A", point=A, citycode="020"),
+                                    driver_destination=Place(name="B", point=B, citycode="020"),
+                                    passenger_destination=Place(name="C", point=C, citycode="020"),
+                                    preferences=Preferences(max_detour_minutes=5))
+    async def driving(self, origin, destination, via=None):
+        return Route(duration_s=600 if (origin, destination) == (A, B) else 300,
+                     distance_m=1000, polyline=[origin, via, destination] if via else [origin, destination],
+                     dropoff_duration_s=300 if via else None,
+                     segments=[RoadSegment(name="人民路", polyline=[origin, via, destination] if via else [origin, destination])])
+    async def nearby(self, center, keyword):
+        return []
+    async def transit(*args):
+        raise MapServiceError("test provider failure")
+    monkeypatch.setenv("AMAP_WEB_SERVICE_KEY", "test-key")
+    monkeypatch.setattr(AmapClient, "driving", driving)
+    monkeypatch.setattr(AmapClient, "nearby", nearby)
+    monkeypatch.setattr(AmapClient, "transit", transit)
+    monkeypatch.setattr("app.amap.build_candidates", lambda *args: [Candidate(Place(name="P", point=P), "roadside", 1000, None, 0)])
+    result = asyncio.run(calculate_live(request))
+    assert len(result.recommendations) == 1
+    rec = result.recommendations[0]
+    assert rec.driver_detour_s == 90
+    assert rec.options[0].total_duration_s == 990
+    assert rec.options[0].arrival_at is not None
+    assert rec.options[0].mode == "taxi"
+    assert any("不完整" in warning for warning in result.warnings)
+
+
+def test_bus_named_metro_feeder_remains_bus(monkeypatch):
+    item = itinerary(kind="普通公交")
+    item["segments"][0]["bus"]["buslines"][0]["name"] = "地铁接驳专线"
+    options = run_transit(monkeypatch, [item])
+    assert options[0].boarding_kind == "bus"
+
+
+def test_access_replaces_original_leg_in_total(monkeypatch):
+    item = itinerary(walking=600)
+    item["segments"][0]["walking"]["distance"] = "100"
+    options = run_transit(monkeypatch, [item], access=250)
+    assert options[0].walking_m == 750
+    assert options[0].duration_s == 600
+
+
+def test_replacement_can_push_whole_trip_over_walking_limit(monkeypatch):
+    item = itinerary(walking=1150)
+    item["segments"][0]["walking"]["distance"] = "100"
+    assert run_transit(monkeypatch, [item], access=250) == []
+
+
+def test_unknown_access_time_cannot_reuse_timetable(monkeypatch):
+    item = itinerary()
+    item["segments"][0]["walking"].pop("cost")
+    assert run_transit(monkeypatch, [item]) == []
+
+
+def test_unknown_road_metadata_is_not_usable():
+    assert not terminal_is_usable(Route(duration_s=20, distance_m=100, polyline=[A, P]), P, True)
+
+
+def test_station_centroid_does_not_prove_entrances_are_too_far():
+    route = Route(duration_s=600, distance_m=2000, polyline=[A, B])
+    request = RecommendationRequest(origin=Place(name="A", point=A), driver_destination=Place(name="B", point=B),
+        passenger_destination=Place(name="C", point=C), preferences=Preferences(modes=["transit"]))
+    station = Place(name="Metro center", point=Point(lon=P.lon, lat=P.lat + .004))
+    assert build_candidates(route, [], [Station(station, "subway")], request)
+
+
+def test_fastest_preference_does_not_trade_five_minutes_for_driver_penalty():
+    faster, slower = rec("fast", 0, 1200), rec("slow", 0, 1500)
+    faster.driver_detour_s = 300
+    slower.driver_detour_s = 120
+    assert rank_recommendations([slower, faster], Preferences(priority="time"))[0].id == "fast"
+
+
+def test_continuous_waypoint_route_uses_provider_step_time():
+    path = {"distance": "2000", "cost": {"duration": "600"}, "steps": [
+        {"road_name": "人民路", "polyline": f"{A.csv()};{P.csv()}", "cost": {"duration": "200"}},
+        {"road_name": "人民路", "polyline": f"{P.csv()};{B.csv()}", "cost": {"duration": "400"}}]}
+    route = AmapClient.parse_driving({}, path, P)
+    assert route.duration_s == 600
+    assert route.dropoff_duration_s == 200
+    path["steps"][1]["polyline"] = f"{STOP.csv()};{B.csv()}"
+    assert AmapClient.parse_driving({}, path, P) is None
+
+
+def test_large_walk_endpoint_gap_is_not_a_straight_line_connection(monkeypatch):
+    near = Point(lon=P.lon + .0001, lat=P.lat)  # About 10m, formerly accepted.
+    async def get(self, path, **params):
+        return {"route": {"paths": [{"distance": "100", "cost": {"duration": "100"},
+            "steps": [{"polyline": f"{near.csv()};{STOP.csv()}"}]}]}}
+    monkeypatch.setattr(AmapClient, "get", get)
+    async def query():
+        async with httpx.AsyncClient() as client:
+            return await AmapClient("test", client).walking(P, STOP)
+    assert asyncio.run(query()) is None
+
+
+def test_cost_preference_has_a_fifteen_minute_time_budget():
+    fast = rec("fast", 0, 600, fee=20)
+    slow = rec("slow", 0, 1800, fee=2)
+    assert rank_recommendations([slow, fast], Preferences(priority="cost"))[0].id == "fast"
+
+
+def test_slower_access_cannot_reuse_an_unreachable_timetable(monkeypatch):
+    item = itinerary()
+    item["segments"][0]["walking"]["cost"]["duration"] = "10"
+    assert run_transit(monkeypatch, [item]) == []
