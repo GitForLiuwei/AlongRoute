@@ -5,12 +5,17 @@ export type Priority = 'balanced' | 'time' | 'cost'
 export type Mode = 'taxi' | 'transit'
 export type Preferences = {
   max_detour_minutes: number
+  max_taxi_fare_yuan: number
   modes: Mode[]
   priority: Priority
   max_walking_m: number
   max_transfers: number
 }
-export type Route = { duration_s: number; distance_m: number; polyline: Point[]; fare_yuan: number | null }
+export type DrivingStep = {
+  road_name: string; instruction: string; action: string; assistant_action: string
+  distance_m: number | null; duration_s: number | null
+}
+export type Route = { duration_s: number; distance_m: number; polyline: Point[]; fare_yuan: number | null; driving_steps?: DrivingStep[] }
 export type TransitStep = {
   kind: 'walk' | 'bus' | 'subway'; title: string
   distance_m: number | null; duration_s: number | null
@@ -33,10 +38,13 @@ export type Recommendation = {
   candidate_source: 'roadside' | 'parking' | 'station_area'
   options: ModeOption[]; suggested_mode: Mode; score: number
   driving_extra_s?: number; comparison?: string
+  recommendation_label?: string
+  dropoff_road?: string | null
   highway_exit?: Place | null; original_exit?: boolean
   stop_status: 'unverified' | 'verified'; stop_warning: string; reason: string
 }
 export type RecommendationResponse = {
+  search_id?: string | null
   mode: 'demo' | 'live'; baseline_route: Route
   recommendations: Recommendation[]; warnings: string[]
   generated_at: string; examined_candidates: number
@@ -48,6 +56,18 @@ export type RecommendationRequest = {
   origin: Place; driver_destination: Place; passenger_destination: Place
   preferences: Preferences; departure_time?: string | null
 }
+export type ManualDropoffResponse = {
+  search_id: string | null
+  origin: Place; driver_destination: Place; passenger_destination: Place; dropoff: Place
+  baseline_route: Route; driver_route: Route; taxi_route: Route | null
+  driving_extra_s: number; driver_detour_s: number; shared_ride_s: number
+  stop_duration_s: number; wait_estimate_s: number
+  fare_yuan: number | null; passenger_total_s: number | null; arrival_at: string | null
+  combined_score: number | null
+  max_detour_minutes: number; max_taxi_fare_yuan: number
+  within_detour_limit: boolean; within_taxi_fare_limit: boolean | null; road_condition_usable: boolean
+  warnings: string[]; generated_at: string; departure_at: string; expires_at: string
+}
 
 async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController()
@@ -57,7 +77,11 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   try {
     const response = await fetch(path, { ...init, signal: controller.signal })
     const json = await response.json().catch(() => null)
-    if (!response.ok) throw new Error(typeof json?.detail === 'string' ? json.detail : `服务暂不可用 (${response.status})`)
+    if (!response.ok) {
+      const message = typeof json?.detail === 'string' ? json.detail : `服务暂不可用 (${response.status})`
+      const id = response.headers.get('X-Search-ID')
+      throw new Error(id ? `${message}（搜索编号：${id}）` : message)
+    }
     if (json === null) throw new Error('服务返回了无法识别的数据，请重试')
     return json as T
   } catch (error) {
@@ -76,6 +100,20 @@ export function duration(s: number): string {
   const minutes = Math.ceil(s / 60)
   const h = Math.floor(minutes / 60), m = minutes % 60
   return h ? `${h}小时${m ? `${m}分` : ''}` : `${m} 分钟`
+}
+
+export function distance(m: number): string {
+  return m < 1000 ? `${Math.round(m)} 米` : `${(m / 1000).toFixed(1)} 公里`
+}
+
+export function coordinates(p: Point): string {
+  return `${p.lon.toFixed(6)}, ${p.lat.toFixed(6)}`
+}
+
+export function detourDuration(s: number): string {
+  const seconds = Math.max(0, Math.round(s))
+  const minutes = Math.floor(seconds / 60), remainder = seconds % 60
+  return minutes ? `${minutes}分${remainder ? `${remainder}秒` : ''}` : `${remainder}秒`
 }
 
 export function fare(v: number | null): string {

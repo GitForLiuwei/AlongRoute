@@ -1,6 +1,7 @@
 """Bounded, spatially diverse candidates; coordinates are never parking permission."""
 from dataclasses import dataclass
 import math
+import re
 
 from .geometry import haversine_m, point_along_path, project_to_path, sample_path
 from .models import Place, Point, RecommendationRequest, Route
@@ -23,6 +24,27 @@ class Candidate:
     approach: Point | None = None
     original_exit: bool = False
     modes: tuple[str, ...] = ("taxi", "transit")
+    discovery_group: str = "baseline"
+
+
+def ordinary_highway(name: str) -> bool:
+    """Ordinary national/provincial road classification is not parking permission."""
+    return bool(any(word in name for word in ("国道", "省道"))
+                or re.search(r"(?<![A-Za-z0-9])[GS]\d{3}(?!\d)", name, re.IGNORECASE))
+
+
+def spread_items(items, limit):
+    if len(items) <= limit:
+        return list(items)
+    if limit <= 1:
+        return list(items[:limit])
+    return [items[round(index * (len(items) - 1) / (limit - 1))] for index in range(limit)]
+
+
+def interleave_groups(groups):
+    """Give every route/area a turn before taking a bounded shortlist."""
+    return [group[index] for index in range(max(map(len, groups), default=0))
+            for group in groups if index < len(group)]
 
 
 def restricted_road(name: str) -> bool:
@@ -42,13 +64,19 @@ def search_centers(route: Route) -> list[Point]:
         for point in [segment.polyline[0], *sample_path(segment.polyline, count=max(1, math.ceil(length / 1200)))]:
             if not any(haversine_m(point, other) < 500 for other in centers):
                 centers.append(point)
-    return centers[:60]
+    return spread_items(centers, 60)
 
 
 def controlled_segment(segment) -> bool:
     if "辅路" in segment.name:
         return False
-    return any(word in segment.name + segment.instruction for word in ("高速", "快速"))
+    if ordinary_highway(segment.name) and not restricted_road(segment.name):
+        return False
+    if any(word in segment.name for word in ("高速", "快速", "高架")):
+        return True
+    # A surface road's instruction may merely announce the next elevated road.
+    return (any(word in segment.instruction for word in ("高速", "快速", "高架"))
+            and (not segment.name or any(word in segment.name for word in ("立交", "匝道"))))
 
 
 def restricted_segment(segment) -> bool:
@@ -70,9 +98,20 @@ def terminal_is_usable(route: Route, point: Point, at_end: bool) -> bool:
         _, _, distance = project_to_path(point, segment.polyline)
         if distance <= 5 and segment.name:
             known_nearby = True
-        if distance <= 50 and restricted_segment(segment):
+        if distance <= 5 and restricted_segment(segment):
             return False
     return known_nearby
+
+
+def dropoff_road_name(route: Route, point: Point) -> str | None:
+    """Use the validated driving geometry; do not invent addresses or road sides."""
+    nearby = [(project_to_path(point, segment.polyline)[2], segment.name)
+              for segment in route.segments if segment.polyline and segment.name
+              and not restricted_segment(segment)]
+    if not nearby:
+        return None
+    distance, name = min(nearby, key=lambda item: item[0])
+    return name if distance <= 5 else None
 
 
 def build_candidates(route: Route, parking: list[Place], stations: list[Station],
@@ -82,10 +121,19 @@ def build_candidates(route: Route, parking: list[Place], stations: list[Station]
         return []
     path_length = sum(haversine_m(a, b) for a, b in zip(path, path[1:]))
     raw: list[tuple[Place, str]] = [(place, "parking") for place in parking]
-    # Real road geometry supplies points independent of parking POI availability.
+    # Sample ordinary-road geometry, including the roads after an exit.
     if not route.is_schematic:
-        seeds = sample_path(path, count=min(100, max(12, math.ceil(path_length / 200))))
-        seeds = [path[0], *seeds, path[-1]]
+        ordinary = [segment for segment in route.segments
+                    if len(segment.polyline) >= 2 and not restricted_segment(segment)]
+        if route.segments:
+            seeds = []
+            for segment in ordinary:
+                length = sum(haversine_m(a, b) for a, b in zip(segment.polyline, segment.polyline[1:]))
+                seeds.extend([segment.polyline[0], *sample_path(segment.polyline,
+                    count=min(6, max(1, math.ceil(length / 200)))), segment.polyline[-1]])
+            seeds = spread_items(list({point.csv(): point for point in seeds}.values()), 120)
+        else:
+            seeds = [path[0], *sample_path(path, count=min(100, max(12, math.ceil(path_length / 200)))), path[-1]]
         for point in seeds:
             raw.append((Place(name="沿途道路附近候选", point=point,
                               citycode=request.origin.citycode), "roadside"))
@@ -99,28 +147,30 @@ def build_candidates(route: Route, parking: list[Place], stations: list[Station]
                 raw.append((Place(name=f"{station.place.name}附近道路"[:120], point=point,
                                   citycode=station.place.citycode or request.origin.citycode), "station_area"))
 
-    junctions = [segment.polyline[-1] for segment in route.segments
-                 if segment.polyline and any(word in segment.end_action for word in ("左转", "右转", "掉头", "环岛"))]
-    restricted = [segment for segment in route.segments if restricted_segment(segment)]
+    restricted = [(segment, (min(p.lon for p in segment.polyline), max(p.lon for p in segment.polyline),
+                             min(p.lat for p in segment.polyline), max(p.lat for p in segment.polyline)))
+                  for segment in route.segments if segment.polyline and restricted_segment(segment)]
     candidates = []
+    lateral_distances = {}
     for place, source in raw:
         if restricted_road(place.name):
             continue
-        if any(haversine_m(place.point, station.place.point) <= 30
-               for station in stations if station.kind == "bus"):
-            continue
-        if any(haversine_m(place.point, junction) <= 50 for junction in junctions):
-            continue
-        if any(segment.polyline and project_to_path(place.point, segment.polyline)[2] <= 25
-               for segment in restricted):
+        # Cheap bounds avoid projecting every POI onto every remote highway segment.
+        lon_margin = 5 / max(1000, 111000 * math.cos(math.radians(place.point.lat)))
+        lat_margin = 5 / 110000
+        if any(bounds[0] - lon_margin <= place.point.lon <= bounds[1] + lon_margin
+               and bounds[2] - lat_margin <= place.point.lat <= bounds[3] + lat_margin
+               and project_to_path(place.point, segment.polyline)[2] <= 5
+               for segment, bounds in restricted):
             continue
         _, progress, lateral = project_to_path(place.point, path)
+        lateral_distances[place.point.csv()] = lateral
         station_distance = min((haversine_m(place.point, station.place.point)
                                 for station in stations), default=None)
         # Only a coarse pruning bound. Actual access is checked against the
         # station/entrance used by the returned transit itinerary on walking roads.
-        estimate = route.duration_s * progress / max(path_length, 1) + haversine_m(
-            place.point, request.passenger_destination.point) / 10 + lateral / 5
+        estimate = haversine_m(place.point, request.passenger_destination.point) / 10 + lateral / 5
+        estimate += route.duration_s * progress / max(path_length, 1)
         candidates.append(Candidate(place, source, progress, station_distance, estimate))
 
     # Reserve coverage along the route; do not cut every candidate solely by its
@@ -132,6 +182,7 @@ def build_candidates(route: Route, parking: list[Place], stations: list[Station]
         return candidate.estimate_s + station_penalty / 1.2
 
     ordered = sorted(candidates, key=score)
+    near_route_order = sorted(ordered, key=lambda c: (lateral_distances[c.place.point.csv()], score(c)))
     selected: list[Candidate] = []
     buckets = {index: 0 for index in range(6)}
 
@@ -147,7 +198,13 @@ def build_candidates(route: Route, parking: list[Place], stations: list[Station]
     # Round-robin across route sections before filling by heuristic score.
     for _ in range(max(1, limit // 6)):
         for bucket in range(6):
-            for candidate in ordered:
+            # Taxi discovery reserves near-route points first, then explores
+            # points nearer B. Lateral distance is only a discovery heuristic;
+            # the complete waypoint route later enforces the actual detour.
+            bucket_order = ordered
+            if request.preferences.modes == ["taxi"] and _ % 2 == 0:
+                bucket_order = near_route_order
+            for candidate in bucket_order:
                 candidate_bucket = min(5, int(candidate.progress_m / max(path_length, 1) * 6))
                 if candidate_bucket == bucket and buckets[bucket] <= _ and add(candidate):
                     break

@@ -20,7 +20,8 @@ class Place(BaseModel):
 
 
 class Preferences(BaseModel):
-    max_detour_minutes: int = Field(default=5, ge=0, le=60)
+    max_detour_minutes: int = Field(default=5, ge=0, le=180)
+    max_taxi_fare_yuan: int = Field(default=200, ge=0, le=200)
     modes: list[Literal["taxi", "transit"]] = Field(default=["taxi", "transit"])
     priority: Literal["balanced", "time", "cost"] = "balanced"
     max_walking_m: int = Field(default=1200, ge=0, le=5000)
@@ -58,12 +59,22 @@ class RoadSegment(BaseModel):
     assistant_action: str = ""
 
 
+class DrivingStep(BaseModel):
+    road_name: str = ""
+    instruction: str = ""
+    action: str = ""
+    assistant_action: str = ""
+    distance_m: int | None = Field(default=None, ge=0)
+    duration_s: int | None = Field(default=None, ge=0)
+
+
 class Route(BaseModel):
     duration_s: int = Field(ge=0)
     distance_m: int = Field(ge=0)
     polyline: list[Point] = Field(default_factory=list)
     fare_yuan: float | None = None
     is_schematic: bool = False
+    driving_steps: list[DrivingStep] = Field(default_factory=list)
     segments: list[RoadSegment] = Field(default_factory=list, exclude=True)
     dropoff_duration_s: int | None = Field(default=None, exclude=True)
     walk_instructions: list[str] = Field(default_factory=list, exclude=True)
@@ -122,6 +133,8 @@ class Recommendation(BaseModel):
     reason: str
     driving_extra_s: int = 0
     comparison: str = ""
+    recommendation_label: str = ""
+    dropoff_road: str | None = None
     highway_exit: Place | None = None
     original_exit: bool = False
 
@@ -132,6 +145,7 @@ class ComparisonOption(BaseModel):
 
 
 class RecommendationResponse(BaseModel):
+    search_id: str | None = None
     mode: Literal["demo", "live"]
     baseline_route: Route
     recommendations: list[Recommendation]
@@ -151,3 +165,36 @@ class PlaceSuggestion(BaseModel):
     point: Point
     citycode: str | None = None
     poi_id: str | None = None
+
+
+class ManualDropoffRequest(RecommendationRequest):
+    dropoff: Place
+
+
+class ManualDropoffResponse(BaseModel):
+    search_id: str | None = None
+    origin: Place
+    driver_destination: Place
+    passenger_destination: Place
+    dropoff: Place
+    baseline_route: Route
+    driver_route: Route
+    taxi_route: Route | None = None
+    driving_extra_s: int
+    driver_detour_s: int
+    shared_ride_s: int
+    stop_duration_s: int = 90
+    wait_estimate_s: int = 300
+    fare_yuan: float | None = None
+    passenger_total_s: int | None = None
+    arrival_at: datetime | None = None
+    combined_score: float | None = None
+    max_detour_minutes: int
+    max_taxi_fare_yuan: int
+    within_detour_limit: bool
+    within_taxi_fare_limit: bool | None = None
+    road_condition_usable: bool
+    warnings: list[str] = Field(default_factory=list)
+    generated_at: datetime
+    departure_at: datetime
+    expires_at: datetime

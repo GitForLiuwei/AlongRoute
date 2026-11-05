@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from app.amap import AmapClient, MapServiceError, calculate_live
-from app.candidates import Candidate, Station, build_candidates, restricted_road, terminal_is_usable
+from app.candidates import Candidate, Station, build_candidates, restricted_road, terminal_is_usable, dropoff_road_name
 from app.geometry import haversine_m
 from app.models import (ModeOption, Place, Point, Preferences, Recommendation,
                         RecommendationRequest, RoadSegment, Route)
@@ -83,11 +83,10 @@ def test_nearby_unrelated_station_does_not_satisfy_access_limit(monkeypatch):
     assert run_transit(monkeypatch, [far]) == []
 
 
-def test_bus_platform_itself_is_not_a_private_car_dropoff(monkeypatch):
+def test_bus_stop_proximity_does_not_reject_verified_transit_access(monkeypatch):
     item = itinerary()
     item["segments"][0]["bus"]["buslines"][0]["departure_stop"]["location"] = P.csv()
-    # Straight distance is zero; the platform must be rejected regardless of a
-    # synthetic routing result that makes its walk appear longer.
+    # Sharing the stop coordinate no longer triggers a distance-only rejection.
     async def get(self, path, **params):
         return {"route": {"transits": [item]}}
     async def walking(self, origin, destination):
@@ -99,7 +98,9 @@ def test_bus_platform_itself_is_not_a_private_car_dropoff(monkeypatch):
             return await AmapClient("test-key", client).transit(
                 Place(name="P", point=P, citycode="020"), Place(name="C", point=C, citycode="020"),
                 datetime.now(timezone.utc), Preferences())
-    assert asyncio.run(query()) == []
+    options = asyncio.run(query())
+    assert len(options) == 1
+    assert options[0].boarding_walk_m == 0
 
 
 def test_nested_provider_geometry_is_preserved():
@@ -159,13 +160,15 @@ def test_candidate_search_expands_to_roads_and_retains_route_coverage():
     assert any(candidate.progress_m > 1600 for candidate in candidates)
 
 
-def test_candidate_search_avoids_known_bus_platform_buffer():
+@pytest.mark.parametrize("mode", ["taxi", "transit"])
+def test_candidate_search_keeps_points_near_bus_platform(mode):
     route = Route(duration_s=600, distance_m=2000, polyline=[A, B])
     request = RecommendationRequest(origin=Place(name="A", point=A), driver_destination=Place(name="B", point=B),
-                                    passenger_destination=Place(name="C", point=C), preferences=Preferences(modes=["transit"]))
-    candidates = build_candidates(route, [], [Station(Place(name="Bus", point=P), "bus")], request)
+                                    passenger_destination=Place(name="C", point=C), preferences=Preferences(modes=[mode]))
+    near_stop = Place(name="站旁候选", point=Point(lon=P.lon + .0001, lat=P.lat))
+    candidates = build_candidates(route, [near_stop], [Station(Place(name="Bus", point=P), "bus")], request)
     assert candidates
-    assert all(haversine_m(candidate.place.point, P) > 30 for candidate in candidates)
+    assert any(candidate.place == near_stop for candidate in candidates)
     assert any(candidate.station_distance_m <= 300 for candidate in candidates)  # Final itineraries enforce 300m, not POI centers.
 
 
@@ -188,7 +191,7 @@ def test_transit_failure_keeps_a_valid_taxi_and_full_trip_time(monkeypatch):
                                     preferences=Preferences(max_detour_minutes=5))
     async def driving(self, origin, destination, via=None):
         return Route(duration_s=600 if (origin, destination) == (A, B) else 300,
-                     distance_m=1000, polyline=[origin, via, destination] if via else [origin, destination],
+                     fare_yuan=20, distance_m=1000, polyline=[origin, via, destination] if via else [origin, destination],
                      dropoff_duration_s=300 if via else None,
                      segments=[RoadSegment(name="人民路", polyline=[origin, via, destination] if via else [origin, destination])])
     async def nearby(self, center, keyword):
@@ -241,6 +244,20 @@ def test_unknown_road_metadata_is_not_usable():
     assert not terminal_is_usable(Route(duration_s=20, distance_m=100, polyline=[A, P]), P, True)
 
 
+def test_dropoff_name_comes_from_the_actual_nearby_driving_segment():
+    route = Route(duration_s=600, distance_m=2000, polyline=[A, P, B], segments=[
+        RoadSegment(name="人民路", polyline=[A, P]), RoadSegment(name="中山路", polyline=[P, B])])
+    assert dropoff_road_name(route, A) == "人民路"
+    assert dropoff_road_name(route, B) == "中山路"
+    assert dropoff_road_name(route, C) is None  # A named remote road is not an address for P.
+
+
+def test_dropoff_name_does_not_invent_missing_names_or_use_highway_labels():
+    route = Route(duration_s=20, distance_m=100, polyline=[A, P], segments=[
+        RoadSegment(name="高速公路", polyline=[A, P]), RoadSegment(polyline=[A, P])])
+    assert dropoff_road_name(route, P) is None
+
+
 def test_station_centroid_does_not_prove_entrances_are_too_far():
     route = Route(duration_s=600, distance_m=2000, polyline=[A, B])
     request = RecommendationRequest(origin=Place(name="A", point=A), driver_destination=Place(name="B", point=B),
@@ -249,7 +266,7 @@ def test_station_centroid_does_not_prove_entrances_are_too_far():
     assert build_candidates(route, [], [Station(station, "subway")], request)
 
 
-def test_fastest_preference_does_not_trade_five_minutes_for_driver_penalty():
+def test_taxi_ranking_balances_driver_and_passenger_time():
     faster, slower = rec("fast", 0, 1200), rec("slow", 0, 1500)
     faster.driver_detour_s = 300
     slower.driver_detour_s = 120
@@ -279,10 +296,10 @@ def test_large_walk_endpoint_gap_is_not_a_straight_line_connection(monkeypatch):
     assert asyncio.run(query()) is None
 
 
-def test_cost_preference_has_a_fifteen_minute_time_budget():
+def test_taxi_cost_preference_has_no_passenger_time_budget():
     fast = rec("fast", 0, 600, fee=20)
     slow = rec("slow", 0, 1800, fee=2)
-    assert rank_recommendations([slow, fast], Preferences(priority="cost"))[0].id == "fast"
+    assert rank_recommendations([slow, fast], Preferences(priority="cost"))[0].id == "slow"
 
 
 def test_slower_access_cannot_reuse_an_unreachable_timetable(monkeypatch):

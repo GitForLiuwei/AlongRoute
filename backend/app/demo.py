@@ -1,7 +1,7 @@
 from datetime import datetime, timezone, timedelta
 
 from .geometry import haversine_m, interpolate
-from .models import (ModeOption, Place, Point, Recommendation,
+from .models import (DrivingStep, ModeOption, Place, Point, Recommendation,
                      RecommendationRequest, RecommendationResponse, Route, TransitStep)
 from .optimizer import rank_recommendations
 
@@ -26,7 +26,9 @@ def create_demo(request: RecommendationRequest) -> RecommendationResponse:
     dist = haversine_m(a, b)
     duration = max(360, round(dist / 9.5))
     baseline = Route(duration_s=duration, distance_m=round(dist * 1.3),
-                     polyline=[a, interpolate(a, b, .34), interpolate(a, b, .7), b])
+                     polyline=[a, interpolate(a, b, .34), interpolate(a, b, .7), b],
+                     driving_steps=[DrivingStep(road_name="演示直达道路（虚构）", instruction="演示：从共同出发地前往司机终点",
+                         distance_m=round(dist * 1.3), duration_s=duration)])
     specs = [(.30, 0, 25, 40, 45, 5, 750),
              (.56, 3, 15, 25, 22, 4, 350),
              (.80, 5, 12, 20, 18, 6, 260)]
@@ -85,6 +87,12 @@ def create_demo(request: RecommendationRequest) -> RecommendationResponse:
         driver_route = Route(duration_s=duration + detour_s - 90,
                              distance_m=baseline.distance_m + detour * 100,
                              polyline=[a, p, b])
+        first_distance = round(driver_route.distance_m * ratio)
+        driver_route.driving_steps = [
+            DrivingStep(road_name="演示前段道路（虚构）", instruction="演示：前往乘客下车点",
+                distance_m=first_distance, duration_s=shared_ride),
+            DrivingStep(road_name="演示后段道路（虚构）", instruction="演示：从下车点继续前往司机终点",
+                distance_m=driver_route.distance_m - first_distance, duration_s=driver_route.duration_s - shared_ride)]
         recs.append(Recommendation(
             id=f"demo-p{i}", point=place, driver_detour_s=detour_s,
             shared_ride_s=shared_ride, stop_duration_s=90,

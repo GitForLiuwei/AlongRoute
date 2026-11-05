@@ -6,13 +6,17 @@ import { ArrowRight, BadgeHelp, BusFront, CarFront, Check, ChevronRight, CircleA
 import PlaceField from './components/PlaceField.vue'
 import MapCanvas from './components/MapCanvas.vue'
 import TransitItinerary from './components/TransitItinerary.vue'
-import { apiGet, apiPost, duration, fare, arrival, type Place, type Priority, type Mode,
+import DriverItinerary from './components/DriverItinerary.vue'
+import ManualDropoffPanel from './components/ManualDropoffPanel.vue'
+import { apiGet, apiPost, duration, detourDuration, distance, coordinates, fare, arrival, type Place, type Priority, type Mode,
   type Recommendation, type RecommendationResponse, type RecommendationRequest } from './lib/api'
 
 const origin = ref<Place | null>({ name: '乐从中学', point: { lon: 113.105351, lat: 22.940194 }, citycode: '0757', poi_id: 'B02F5076M7' })
 const driverDestination = ref<Place | null>({ name: '惠阳区新圩镇东风村卫生站', point: { lon: 114.306364, lat: 22.825135 }, citycode: '0752', poi_id: 'B02F00QI66' })
 const passengerDestination = ref<Place | null>({ name: '里城玺樾山', point: { lon: 114.122363, lat: 22.627733 }, citycode: '0755', poi_id: 'B0FFJ3JUUX' })
 const detour = ref(5)
+const manualMode = ref(false)
+const taxiFareLimit = ref(200)
 const selectedModes = ref<Mode[]>(['taxi', 'transit'])
 const priority = ref<Priority>('balanced')
 const walkLimit = ref(1200)
@@ -42,13 +46,16 @@ function cancel() {
   controller = null
   loading.value = false
 }
-watch([origin, driverDestination, passengerDestination, detour, selectedModes, priority, walkLimit, transfers, departure], () => {
+watch([origin, driverDestination, passengerDestination, detour, taxiFareLimit, selectedModes, priority, walkLimit, transfers, departure, manualMode], () => {
   stale.value = true
   cancel()
 }, { deep: true, flush: 'sync' })
 const active = computed<Recommendation | null>(() => result.value?.recommendations.find(x => x.id === selectedId.value) || result.value?.recommendations[0] || null)
 const activeOption = computed(() => active.value?.options.find(x => x.mode === shownMode.value) || null)
 const canSubmit = computed(() => !!origin.value && !!driverDestination.value && !!passengerDestination.value && selectedModes.value.length > 0)
+const currentPreferences = computed(() => ({ max_detour_minutes: detour.value,
+  max_taxi_fare_yuan: taxiFareLimit.value, modes: selectedModes.value,
+  priority: priority.value, max_walking_m: walkLimit.value, max_transfers: transfers.value }))
 
 function toggleMode(next: Mode) {
   if (selectedModes.value.includes(next)) {
@@ -73,6 +80,7 @@ async function run() {
       passenger_destination: passengerDestination.value!,
       preferences: {
         max_detour_minutes: detour.value, modes: selectedModes.value,
+        max_taxi_fare_yuan: taxiFareLimit.value,
         priority: priority.value, max_walking_m: walkLimit.value,
         max_transfers: transfers.value,
       },
@@ -107,7 +115,9 @@ async function copyPlace() {
   const { lon, lat } = active.value.point.point
   const text = `${active.value.point.name}（停靠合法性待核实）\n坐标(GCJ-02)：${lon},${lat}\n仅供确认地点，不代表可停车。\n司机起点：${snapshot.value?.origin.name}\n司机途经下车点后前往：${snapshot.value?.driver_destination.name}（${snapshot.value?.driver_destination.point.lon},${snapshot.value?.driver_destination.point.lat}）\n乘客接驳：${activeOption.value?.boarding_stop?.name ?? "打车接车位置待确认"}（${activeOption.value?.boarding_stop?.point.lon ?? "待确认"},${activeOption.value?.boarding_stop?.point.lat ?? "待确认"}）\n${activeOption.value?.details ?? ""}`
   try {
-    await navigator.clipboard.writeText(text)
+    const driver = active.value.driver_route
+    const driverSummary = `\n司机经停路线：${snapshot.value?.origin.name} → ${active.value.highway_exit ? `${active.value.highway_exit.name} → ` : ''}${active.value.point.name} → ${snapshot.value?.driver_destination.name}\n司机总里程：${distance(driver.distance_m)}；总耗时（含停靠）：${duration(driver.duration_s + active.value.stop_duration_s)}；增加：${duration(active.value.driver_detour_s)}\n行驶路段：\n${driver.driving_steps?.map((step, index) => `${index + 1}. ${step.road_name || '未命名道路'} ${step.instruction || step.action || ''}`).join('\n') || '未提供，请重新计算'}`
+    await navigator.clipboard.writeText(text + driverSummary)
     copied.value = true
     setTimeout(() => { copied.value = false }, 2200)
   } catch {
@@ -119,7 +129,7 @@ onMounted(async () => {
     const config = await apiGet<{ mode: 'demo' | 'live'; map_proxy_ready: boolean }>('/api/config')
     mode.value = config.mode
     proxyReady.value = config.map_proxy_ready
-    if (config.mode === 'demo') await run()
+    if (config.mode === 'demo' && !manualMode.value) await run()
   } catch {
     error.value = '无法连接后端。请先启动 FastAPI 服务，再刷新页面。'
   }
@@ -153,38 +163,54 @@ onMounted(async () => {
           <PlaceField v-model="passengerDestination" kind="passenger" label="朋友目的地 C" placeholder="搜索朋友目的地" />
         </div>
         <p class="place-hint"><Info :size="14" /> 输入地点后，请选择搜索结果，以获取准确坐标。</p>
+        <div class="priority-tabs" aria-label="规划模式">
+          <button :class="{ active: !manualMode }" @click="manualMode = false">自动推荐</button>
+          <button :class="{ active: manualMode }" @click="manualMode = true">测试模式 · 指定下车点</button>
+        </div>
 
         <div class="section-head control-head"><span class="step-number">02</span><h2>出行偏好</h2><SlidersHorizontal :size="17" class="head-muted" /></div>
         <div class="setting-row"><label for="detour">司机最多增加总时间（含停靠）</label><strong class="detour-value">{{ detour }} <small>分钟</small></strong></div>
-        <input id="detour" v-model.number="detour" class="detour-slider" type="range" min="0" max="30" step="1" :style="{ '--progress': `${detour / 30 * 100}%` }" />
-        <div class="range-ends"><span>0 分钟 · 不接受额外耗时</span><span>30 分钟</span></div>
+        <input id="detour" v-model.number="detour" class="detour-slider" type="range" min="0" max="180" step="1" :style="{ '--progress': `${detour / 180 * 100}%` }" />
+        <div class="range-ends"><span>0 分钟 · 不接受额外耗时</span><span>180 分钟 · 3 小时</span></div>
 
-        <label class="form-label">朋友下车后的交通方式</label>
-        <div class="transport-toggles">
+        <label v-if="!manualMode" class="form-label">朋友下车后的交通方式</label>
+        <div v-if="!manualMode" class="transport-toggles">
           <button :class="{ checked: selectedModes.includes('taxi') }" @click="toggleMode('taxi')"><CarFront :size="19" />打车 <Check v-if="selectedModes.includes('taxi')" :size="15" /></button>
           <button :class="{ checked: selectedModes.includes('transit') }" @click="toggleMode('transit')"><BusFront :size="19" />公交 / 地铁 <Check v-if="selectedModes.includes('transit')" :size="15" /></button>
         </div>
-        <p v-if="selectedModes.includes('transit')" class="transit-rule"><BusFront :size="14" /> 仅公交 / 地铁方案要求到实际站台或入口步行≤300米，并尽量送近；打车不受此限制。</p>
-        <label class="form-label">推荐偏好</label>
-        <div class="priority-tabs">
+        <div v-if="manualMode || selectedModes.includes('taxi')" class="taxi-budget-control">
+          <div class="setting-row"><label for="taxi-fare-limit">乘客打车费用上限</label><strong class="detour-value">{{ taxiFareLimit }} <small>元</small></strong></div>
+          <input id="taxi-fare-limit" v-model.number="taxiFareLimit" class="detour-slider" type="range" min="0" max="200" step="1" :style="{ '--progress': `${taxiFareLimit / 200 * 100}%` }" />
+          <div class="range-ends"><span>0 元</span><span>200 元</span></div>
+          <p class="transit-rule">{{ manualMode ? '测试模式会展示超出预算的测算结果，并标明是否在预算内。' : '仅推荐预估打车费不超过此金额的方案；费用未知时不推荐打车。' }}</p>
+        </div>
+        <p v-if="!manualMode && selectedModes.includes('transit')" class="transit-rule"><BusFront :size="14" /> 仅公交 / 地铁方案要求到实际站台或入口步行≤300米，并尽量送近；打车不受此限制。</p>
+        <label v-if="!manualMode && selectedModes.includes('transit')" class="form-label">公交推荐偏好</label>
+        <div v-if="!manualMode && selectedModes.includes('transit')" class="priority-tabs">
           <button :class="{ active: priority === 'balanced' }" @click="priority = 'balanced'">均衡推荐</button>
           <button :class="{ active: priority === 'time' }" @click="priority = 'time'">省时间</button>
           <button :class="{ active: priority === 'cost' }" @click="priority = 'cost'">省费用</button>
         </div>
-        <div class="extra-grid">
+        <p v-if="!manualMode && selectedModes.includes('taxi')" class="transit-rule">打车按司机增加时间、乘客全程时间和车费综合推荐：多花1元，若能让司机与乘客合计省至少3分钟，就优先省时。费用上限与司机绕路上限仍生效。</p>
+        <div v-if="!manualMode" class="extra-grid">
           <label>公交全程步行上限<select v-model.number="walkLimit"><option :value="500">500 米</option><option :value="1000">1000 米</option><option :value="1200">1200 米</option><option :value="2000">2000 米</option></select></label>
           <label>最大换乘次数<select v-model.number="transfers"><option :value="0">不换乘</option><option :value="1">1 次</option><option :value="2">2 次</option><option :value="3">3 次</option></select></label>
         </div>
         <label class="departure-label">出发时间（中国时间，可选）<input v-model="departure" type="datetime-local" /></label>
 
-        <button class="run-button" :disabled="!canSubmit || loading" @click="run">
+        <button v-if="!manualMode" class="run-button" :disabled="!canSubmit || loading" @click="run">
           <LoaderCircle v-if="loading" :size="19" class="spinning" />
           <Sparkles v-else :size="19" />{{ loading ? '正在计算路线...' : '智能寻找下车点' }}<ArrowRight v-if="!loading" :size="19" />
         </button>
+        <p v-else class="transit-rule">在指定下车点面板填写 P 并点击测算，可查看绕路时间、后续打车费用和乘客全程时间。</p>
         <div class="security-hint"><ShieldAlert :size="16" /> 下车前确认临停条件，避开高速、快速路及禁停路段，不占用公交站台。</div>
       </aside>
 
       <section class="content">
+        <ManualDropoffPanel v-if="manualMode" :origin="origin" :driver-destination="driverDestination"
+          :passenger-destination="passengerDestination" :preferences="currentPreferences"
+          :departure="departure" :live="mode === 'live'" />
+        <template v-else>
         <div class="map-shell">
           <MapCanvas :result="result" :active="active" :origin="snapshot?.origin ?? origin" :driver-destination="snapshot?.driver_destination ?? driverDestination"
             :passenger-destination="snapshot?.passenger_destination ?? passengerDestination" :shown-mode="shownMode" :proxy-ready="proxyReady" />
@@ -203,6 +229,7 @@ onMounted(async () => {
           <div v-if="expired && result" class="notice caution-notice">结果已超过5分钟，请重新核验后出行。</div>
           <div v-if="loading" class="notice">正在搜索沿途地点并核验路线，可能需要约1分钟。<button @click="cancel">取消计算</button></div>
           <p v-if="result" class="journey-summary">计算时间：{{ arrival(result.generated_at) }} · 参考出发：{{ arrival(result.departure_at ?? null) }}</p>
+          <p v-if="result?.search_id" class="journey-summary">搜索编号：{{ result.search_id }} · 用于查询本地搜索日志</p>
           <div v-if="error" class="notice error-notice"><CircleAlert :size="18" /> {{ error }}</div>
           <div v-if="result?.warnings?.length" class="notice caution-notice"><ShieldAlert :size="18" /><div><strong>{{ result.mode === 'demo' ? '当前是模拟演示，不可用于真实出行' : '结果仅为待确认候选' }}</strong><p v-for="warning in result.warnings" :key="warning">{{ warning }}</p></div></div>
           <div v-if="!result && !error" class="empty-state"><MapPin :size="26"/><strong>填写行程，开始智能规划</strong><p>先比较司机绕路成本，再计算乘客后续交通方案。</p></div>
@@ -210,15 +237,21 @@ onMounted(async () => {
 
           <div v-if="result?.recommendations.length" class="result-grid">
             <button v-for="(r, idx) in result.recommendations" :key="r.id" class="recommendation-card" :class="{ picked: active?.id === r.id }" @click="pick(r)">
-              <div class="card-header"><span class="card-index">0{{ idx + 1 }}</span><span class="card-title">{{ r.point.name }}</span><span v-if="idx === 0" class="best-chip">{{ snapshot?.preferences.priority === 'cost' ? '费用优选' : snapshot?.preferences.priority === 'time' ? '时间优选' : '综合优选' }}</span></div>
-              <div class="card-stats"><div><span>司机增加</span><strong class="green-stat">+{{ duration(r.driver_detour_s) }}</strong></div><div><span>乘客全程</span><strong>{{ duration(r.options.find(x => x.mode === r.suggested_mode)?.total_duration_s ?? 0) }}</strong></div><div><span>后续费用</span><strong>{{ fare(r.options.find(x => x.mode === r.suggested_mode)?.fare_yuan ?? null) }}</strong></div></div>
+              <div class="card-header"><span class="card-index">0{{ idx + 1 }}</span><span class="card-title">{{ r.point.name }}</span><span v-if="r.recommendation_label || idx === 0" class="best-chip">{{ r.recommendation_label || (snapshot?.preferences.priority === 'cost' ? '费用优选' : snapshot?.preferences.priority === 'time' ? '时间优选' : '综合优选') }}</span></div>
+              <div class="card-stats"><div><span>司机增加约</span><strong class="green-stat">+{{ detourDuration(r.driver_detour_s) }}</strong></div><div><span>乘客全程</span><strong>{{ duration(r.options.find(x => x.mode === r.suggested_mode)?.total_duration_s ?? 0) }}</strong></div><div><span>后续费用</span><strong>{{ fare(r.options.find(x => x.mode === r.suggested_mode)?.fare_yuan ?? null) }}</strong></div></div>
+              <p class="card-location">P · {{ coordinates(r.point.point) }}</p>
               <p v-if="r.options.find(x => x.mode === r.suggested_mode)?.mode === 'transit'" class="card-access">到站步行 {{ r.options.find(x => x.mode === 'transit')?.boarding_walk_m }} 米 · 公交 / 地铁</p>
               <div class="card-foot"><span><ShieldAlert :size="13"/>待核实上下客</span><ChevronRight :size="17" /></div>
             </button>
           </div>
 
+          <DriverItinerary v-if="active && result" :key="active.id" :origin="snapshot?.origin ?? null"
+            :destination="snapshot?.driver_destination ?? null" :baseline="result.baseline_route"
+            :recommendation="active" :demo="result.mode === 'demo'" />
+
           <div v-if="active" class="detail-panel">
             <div class="detail-title"><div><span class="eyebrow">SELECTED STOP</span><h3>{{ active.point.name }}</h3></div><span class="unverified-badge"><CircleAlert :size="14"/>未验证停靠合法性</span></div>
+            <p class="dropoff-location">{{ active.dropoff_road ? `所在道路：${active.dropoff_road} · ` : '' }}GCJ-02 坐标：{{ coordinates(active.point.point) }}<br />{{ active.candidate_source === 'roadside' ? '这是道路采样点，尚未对应到具体场所或停车入口。' : '候选名称用于辨认周边位置，实际下车位置以地图 P 标记为准。' }}</p>
             <p v-if="active.highway_exit" class="journey-summary">{{ active.original_exit ? '司机原路线驶出区域' : '提前驶出高速' }}：{{ active.highway_exit.name }} · 已计入司机后续行程耗时</p>
             <p class="reason">{{ active.reason }}</p><p v-if="active.comparison" class="reason">{{ active.comparison }}</p>
             <p class="journey-summary">额外驾驶 {{ duration(active.driving_extra_s ?? Math.max(0, active.driver_detour_s - active.stop_duration_s)) }} · 停靠 {{ duration(active.stop_duration_s) }}</p>
@@ -245,6 +278,7 @@ onMounted(async () => {
             </div></div>
           <div class="footer-note"><Clock3 :size="14" /> 自动推荐仅供辅助决策，路况、公交时刻和停车规则以实际情况为准。</div>
         </div>
+        </template>
       </section>
     </main>
     <footer class="footer"><span>© AlongRoute · 为每一段同行找到更好的分岔点</span><span><GitBranch :size="14" /> 本地 MVP v0.1 · <span>{{ mode === 'demo' ? 'Demo' : 'AMap' }}</span></span></footer>

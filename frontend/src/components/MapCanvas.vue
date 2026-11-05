@@ -47,7 +47,7 @@ const markers = computed(() => [
   props.origin ? { label: 'A', name: '出发', p: props.origin.point, type: 'origin' } : null,
   props.driverDestination ? { label: 'B', name: '司机终点', p: props.driverDestination.point, type: 'driver' } : null,
   props.passengerDestination ? { label: 'C', name: '朋友终点', p: props.passengerDestination.point, type: 'passenger' } : null,
-  props.active ? { label: 'P', name: '待核实候选点', p: props.active.point.point, type: 'dropoff' } : null,
+  props.active ? { label: 'P', name: props.active.point.name, p: props.active.point.point, type: 'dropoff' } : null,
   transitOption.value?.boarding_stop ? { label: 'S', name: transitOption.value.boarding_stop.name, p: transitOption.value.boarding_stop.point, type: 'dropoff' } : null,
 ].filter((p): p is { label: string; name: string; p: Point; type: string } => !!p))
 
@@ -147,10 +147,15 @@ onBeforeUnmount(() => { map?.destroy(); map = null })
     </svg>
     <div v-if="mapError" class="map-issue">地图加载失败：{{ mapError }}，已切换为示意图</div>
     <div class="map-legend">
-      <span><i class="line-icon driver-line"></i>司机路线</span>
+      <span><i class="line-icon" style="border-color:#9bb9df"></i>司机原路线</span>
+      <span><i class="line-icon driver-line"></i>司机经停路线</span>
       <span><i class="line-icon taxi-line"></i>打车</span>
       <span><i class="line-icon transit-line"></i>公交/地铁</span>
       <span v-if="transitOption"><i class="line-icon" style="border-color:#8a5bbb"></i>到站步行 · S 上车站</span>
     </div>
   </section>
 </template>
+
+<style scoped>
+.map-legend { flex-wrap: wrap; max-width: calc(100% - 20px); }
+</style>
