@@ -7,7 +7,11 @@ from . import search_log
 # Only planning diagnostics are exposed; map requests and arbitrary log fields stay local.
 FIELDS = {
     'route_input': ('request', 'mode'),
-    'discovery_map': ('driver_routes', 'passenger_routes', 'search_centers', 'search_radius_m'),
+    'discovery_map': ('driver_routes', 'passenger_routes', 'search_centers', 'search_radius_m', 'strategy'),
+    'hub_seeds': ('hub_kind', 'center', 'cache', 'places'),
+    'hub_shortlist': ('generated', 'selected'),
+    'hub_exit_supplement': ('count',),
+    'candidate_coarse': ('point', 'estimate'),
     'closest_route_point': ('point', 'controlled', 'distance_to_destination_m'),
     'exits_around_q': ('q', 'exits'),
     'destination_exits_selected': ('exits',),
@@ -25,7 +29,7 @@ FIELDS = {
     'search_finished': ('status',),
 }
 TRACE_FIELDS = ('candidate_key', 'route_index', 'region', 'direction', 'sample_tier',
-                'origins', 'source', 'discovery_group')
+                'origins', 'source', 'discovery_group', 'hub_kind')
 
 
 def read_replay(identifier):

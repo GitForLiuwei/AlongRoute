@@ -3,6 +3,7 @@ import asyncio
 from copy import deepcopy
 import math
 import os
+from hashlib import sha256
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from weakref import WeakKeyDictionary
@@ -18,7 +19,8 @@ from .candidates import (Candidate, Station, build_candidates, search_centers, t
 from .highway import ExitAnchor, highway_centers, original_exits, discovered_exit, exit_was_used
 from .exit_discovery import FocusedDiscovery, closest_location
 from .transit import coordinates, parse_itinerary
-from .preselection import candidate_trace
+from .preselection import candidate_key, candidate_trace
+from .hub_discovery import HubDiscovery
 from .search_log import event, recommendation_summary
 from .map_cache import response_cache
 from time import perf_counter
@@ -335,8 +337,18 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
         baselines = [route for route in baselines
                      if route.duration_s <= baseline.duration_s + discovery_extra_s]
         complete = True
+        hub_first = os.getenv("CANDIDATE_STRATEGY", "hub_first").strip() != "legacy"
         focused_exits = any(controlled_segment(segment) for route in baselines for segment in route.segments)
-        if focused_exits:
+        if hub_first:
+            discovery = await HubDiscovery().run(api, request, baselines)
+            candidates = discovery.candidates
+            complete = discovery.complete
+            warnings.extend(dict.fromkeys(discovery.warnings))
+            anchors = [anchor for route in baselines for anchor in original_exits(route, request.origin.citycode)]
+            pools = {mode: [] for mode in request.preferences.modes}
+            event("candidates_ready", strategy="hub_first", count=len(candidates),
+                  candidates=[dict(point=c.place.model_dump(mode="json"), **candidate_trace(c)) for c in candidates])
+        elif focused_exits:
             discovery = await FocusedDiscovery().run(api, request, baselines)
             candidates = discovery.candidates
             complete = discovery.complete
@@ -691,7 +703,7 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                     return
                 used_exit_place = candidate.exit_place
                 used_original_exit = candidate.original_exit
-                if candidate.discovery_group == "destination":
+                if candidate.discovery_group in {"destination", "hub", "hub_surface"}:
                     _, dropoff_progress, _ = project_to_path(place.point, driver.polyline)
                     used_before_dropoff = [anchor for anchor in original_exits(driver, place.citycode)
                                            if anchor.progress_m < dropoff_progress]
@@ -723,7 +735,8 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                 road_name = dropoff_road_name(driver, place.point)
                 if candidate.source == "roadside":
                     place = place.model_copy(update={"name": f"{road_name or '未命名道路'} · 下车候选"[:120]})
-                results.append(Recommendation(id=place.poi_id or f"p-{place.point.csv()}", point=place,
+                identity = sha256(repr(candidate_key(candidate)).encode()).hexdigest()[:16]
+                results.append(Recommendation(id=f"p-{identity}", point=place,
                     dropoff_road=road_name,
                     driver_detour_s=extra, driving_extra_s=driving_extra, driver_route=driver,
                     highway_exit=used_exit_place, original_exit=used_original_exit,
@@ -752,6 +765,11 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
             for offset in range(0, len(candidates), 8):
                 await asyncio.gather(*(evaluate(c) for c in candidates[offset:offset + 8]))
                 covered_modes = {option.mode for result in results for option in result.options}
+                if (hub_first and offset + 8 >= 24 and len(results) >= 6
+                        and set(request.preferences.modes) <= covered_modes
+                        and required_regions <= evaluated_regions):
+                    # A bounded shortlist is not an optimality claim; report remaining work below.
+                    break
                 # With taxi enabled, continue across the bounded candidate pool:
                 # six feasible points do not establish the detour/fare frontier.
                 if ("taxi" not in pools and len(results) >= 6
@@ -760,7 +778,7 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                     break
             # Refine around the station actually used by successful itineraries.
             # This is separate from arbitrary nearby station POIs discovered earlier.
-            if "transit" in pools and not focused_exits:
+            if "transit" in pools and not focused_exits and not hub_first:
                 stops = {}
                 for rec in sorted(results, key=lambda rec: min(option_score(o, request.preferences.priority) for o in rec.options)):
                     transit_options = [o for o in rec.options if o.mode == "transit"]
@@ -830,6 +848,7 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
         if not comparisons:
             warnings.append("本次未取得符合接驳约束的对照方案，无法判断中途下车是否优于直接出行。")
         if evaluated_count < len(candidates):
+            complete = False
             for candidate in candidates[evaluated_count:]:
                 event("candidate_not_evaluated", reason="early_stop_or_planning_budget", **candidate_trace(candidate))
             warnings.append("已保留足够可用候选，剩余候选尚未精算，推荐不代表全局最优。")

@@ -10,13 +10,14 @@ type Dot = { key: string; point: Point; name: string; status: string; details: s
 const opened = ref(false), identifier = ref(''), busy = ref(false), error = ref('')
 const data = ref<Replay | null>(null), stage = ref(0), selected = ref(''), query = ref('')
 let generation = 0
-const stages = ['搜索出口', '生成候选', '名额预选', '路线核验', '最终推荐']
+const stages = ['搜索枢纽 / 出口', '生成候选', '名额预选', '路线核验', '最终推荐']
 const colors: Record<string, string> = { exit: '#8b5cf6', generated: '#64748b', selected: '#2563eb', quota: '#cbd5e1', pending: '#a16207', rejected: '#dc2626', accepted: '#0891b2', final: '#059669' }
-const labels: Record<string, string> = { exit: '搜索到的出口 / Q', generated: '已生成', selected: '进入精算', quota: '名额不足', pending: '尚未完成核验', rejected: '核验未通过', accepted: '核验通过', final: '最终推荐' }
+const labels: Record<string, string> = { exit: '枢纽 / 出口 / Q', generated: '已生成', selected: '进入精算', quota: '名额不足', pending: '尚未完成核验', rejected: '核验未通过', accepted: '核验通过', final: '最终推荐' }
 const translations: Record<string, string> = {
   before: '分流前', after: '分流后', to_b: '司机方向', to_c: '乘客方向', near: '近距离', middle: '中距离', far: '远距离',
   split: '司机路线出口', passenger_split: '乘客方向出口', baseline: '原路线普通道路', baseline_surface: '原路线普通道路',
   station_approach: '站点接驳', roadside: '道路采样', parking: '停车场', station_area: '站旁道路',
+  hub: '枢纽接近道路', hub_surface: '走廊普通道路', subway: '地铁枢纽', bus: '公交站台',
   missing_continuous_driver_route: '未取得连续司机路线', exit_not_reached_in_order: '未按顺序通过指定出口',
   unusable_or_unknown_road: '道路条件不适用或未知', detour_limit: '司机增加时间超限', no_viable_onward_options: '没有符合要求的后续交通方案',
   evaluation_cancelled_or_budget_exhausted: '核验取消或预算耗尽', map_service_error: '地图服务查询失败',
@@ -46,9 +47,9 @@ const events = computed(() => data.value?.events || [])
 const input = computed(() => events.value.find(e => e.event === 'route_input')?.request)
 const result = computed(() => events.value.find(e => e.event === 'route_result'))
 const discovery = computed(() => events.value.find(e => e.event === 'discovery_map'))
-const summary = computed(() => events.value.find(e => e.event === 'preselection_summary'))
+const summary = computed(() => [...events.value].reverse().find(e => e.event === 'preselection_summary'))
 const stats = computed(() => [
-  events.value.filter(e => e.event === 'exit_split_discovered').length,
+  events.value.filter(e => ['hub_seeds', 'exit_split_discovered'].includes(e.event)).length,
   summary.value?.unique ?? events.value.filter(e => e.event === 'candidate_generated').length,
   summary.value?.selected ?? events.value.filter(e => e.event === 'candidate_started').length,
   events.value.filter(e => e.event === 'candidate_accepted').length,
@@ -64,6 +65,14 @@ const dots = computed(() => {
   }
   if (stage.value === 0) {
     for (const e of events.value) {
+      if (e.event === 'hub_seeds') {
+        for (const place of e.places || []) {
+          if (valid(place.point)) {
+            const dot = add(`hub:${e.hub_kind}:${pointKey(place.point)}`, place.point, place.name, 'exit')
+            dot?.details.push(`${explain(e.hub_kind)} · ${e.cache ? '本地候选池' : '周边搜索'}；此处是召回锚点，尚未确定下客道路`)
+          }
+        }
+      }
       if (e.event === 'closest_route_point') add(`q:${e.sequence}`, e.point, 'Q · 司机路线靠近乘客终点的位置', 'exit')
       if (e.event === 'exits_around_q' || e.event === 'destination_exits_selected') {
         for (const exit of e.exits || []) {
@@ -83,6 +92,8 @@ const dots = computed(() => {
       if (!dot) continue
       if (e.event === 'candidate_generated') {
         dot.details = [`来源：${[e.discovery_group, e.source, e.direction, e.sample_tier].filter(Boolean).map(explain).join(' · ')}`, `探索路线 ${Number(e.route_index ?? 0) + 1}`, ...(e.candidate_key[2] ? [`出口约束：${e.candidate_key[2]}`] : [])]
+        const estimate = [...events.value].reverse().find(item => item.event === 'candidate_coarse' && JSON.stringify(item.candidate_key) === key)?.estimate
+        if (estimate) dot.details.push(`粗排：${estimate.engine === 'osrm' ? 'OSRM 路网估算' : '几何估算'}，预估绕行 ${(estimate.detour_s / 60).toFixed(1)} 分钟；只决定核验顺序${estimate.missing_reason ? `（${estimate.missing_reason}）` : ''}`)
       }
       if (stage.value >= 3) {
         if (e.point?.name || e.recommendation?.point?.name) dot.name = e.point?.name || e.recommendation.point.name
@@ -142,9 +153,9 @@ watch(stage, () => { selected.value = ''; query.value = '' })
         <p>{{ input?.origin?.name }} → 司机：{{ input?.driver_destination?.name }} / 乘客：{{ input?.passenger_destination?.name }}</p>
         <p v-if="!data.finished || !result" class="replay-warning">日志尚未结束或记录不完整；未显示的结果不能视为已淘汰。</p>
         <p v-if="result?.mode === 'demo'" class="replay-warning">这是演示数据，没有真实的出口发现和路线核验过程。</p>
-        <p v-else class="replay-warning">{{ result?.search_complete === false ? '本次搜索覆盖不完整。' : '' }}仅展示日志中已记录的点；没有进入候选池的位置不会出现在后续步骤中。{{ discovery ? '细线为探索路线的简化轨迹，浅紫圈为出口查询范围。' : '旧日志不含搜索轨迹，图上不连线。' }}</p>
-        <nav class="replay-stages" aria-label="候选筛选步骤"><button v-for="(title, i) in stages" :key="title" :class="{ current: stage === i }" :aria-current="stage === i ? 'step' : undefined" @click="stage = i">{{ i + 1 }}. {{ title }}<small>{{ stats[i] }} {{ i === 0 ? '个分流发现记录' : i === 3 ? '个核验通过记录' : i === 4 ? '个推荐方案' : '个候选' }}</small></button></nav>
-        <p>{{ [ 'Q 用于定位司机路线搜索区域；紫点为已选出口和 Q。出口出现不代表收费站位置可直接下客。', '候选来自出口外分流道路、近中远采样、站旁道路及原路线普通道路；不同出口约束保留为不同候选。', '按来源分配有限精算名额，灰点因名额限制未进入精算，不代表路线不可行。', '核验完整司机经停路线、驶出顺序、道路条件、绕路上限和后续交通。通过核验仍不等于确认可停车。', '核验通过后继续比较交通方式、时间和费用。打车综合分＝司机增加分钟＋乘客全程分钟＋车费×3，越低越优。' ][stage] }}</p>
+        <p v-else class="replay-warning">{{ result?.search_complete === false ? '本次搜索覆盖不完整。' : '' }}仅展示日志中已记录的点；没有进入候选池的位置不会出现在后续步骤中。{{ discovery ? '细线为探索路线的简化轨迹，浅紫圈为候选查询范围。' : '旧日志不含搜索轨迹，图上不连线。' }}</p>
+        <nav class="replay-stages" aria-label="候选筛选步骤"><button v-for="(title, i) in stages" :key="title" :class="{ current: stage === i }" :aria-current="stage === i ? 'step' : undefined" @click="stage = i">{{ i + 1 }}. {{ title }}<small>{{ stats[i] }} {{ i === 0 ? '个搜索记录' : i === 3 ? '个核验通过记录' : i === 4 ? '个推荐方案' : '个候选' }}</small></button></nav>
+        <p>{{ [ '优先召回地铁、公交枢纽和停车场；出口及 Q 用于补充搜索。图中锚点不代表可以直接下客。', '候选主要来自枢纽附近实际可达的普通道路，并补充沿途道路和出口分流位置；不同出口约束保留为不同候选。', '结合批量粗排、枢纽类别和区域覆盖分配精算名额；粗估不作为硬淘汰依据，灰点不代表路线不可行。', '核验完整司机经停路线、驶出顺序、道路条件、绕路上限和后续交通。通过核验仍不等于确认可停车。', '核验通过后继续比较交通方式、时间和费用。打车综合分＝司机增加分钟＋乘客全程分钟＋车费×3，越低越优。' ][stage] }}</p>
         <div class="replay-layout">
           <div>
             <svg class="replay-map" viewBox="0 0 800 410" role="img" aria-label="候选点空间分布示意图，非道路地图">
@@ -152,14 +163,14 @@ watch(stage, () => { selected.value = ''; query.value = '' })
               <path d="M0 100H800 M0 200H800 M0 300H800 M200 0V410 M400 0V410 M600 0V410" stroke="#e2e8f0" />
               <polyline v-for="(line, i) in discovery?.driver_routes || []" :key="`driver:${i}`" :points="plotted(line)" fill="none" stroke="#93b4dd" stroke-width="2" />
               <polyline v-for="(line, i) in discovery?.passenger_routes || []" :key="`passenger:${i}`" :points="plotted(line)" fill="none" stroke="#eab478" stroke-width="2" stroke-dasharray="5 4" />
-              <template v-if="stage === 0"><ellipse v-for="(p, i) in discovery?.search_centers || []" :key="`center:${i}`" :cx="xy(p)[0]" :cy="xy(p)[1]" :rx="(discovery?.search_radius_m || 1500) / 102600 / bounds.dx * 710" :ry="(discovery?.search_radius_m || 1500) / 111200 / bounds.dy * 320" fill="#8b5cf6" fill-opacity=".05" stroke="#8b5cf6" stroke-opacity=".2"><title>出口查询中心 · 半径 {{ discovery?.search_radius_m }} 米</title></ellipse></template>
+              <template v-if="stage === 0"><ellipse v-for="(p, i) in discovery?.search_centers || []" :key="`center:${i}`" :cx="xy(p)[0]" :cy="xy(p)[1]" :rx="(discovery?.search_radius_m || 1500) / 102600 / bounds.dx * 710" :ry="(discovery?.search_radius_m || 1500) / 111200 / bounds.dy * 320" fill="#8b5cf6" fill-opacity=".05" stroke="#8b5cf6" stroke-opacity=".2"><title>候选查询中心 · 半径 {{ discovery?.search_radius_m }} 米</title></ellipse></template>
               <g v-for="dot in filtered" :key="dot.key" :transform="`translate(${xy(dot.point).join(',')})`" tabindex="0" role="button" :aria-label="`${dot.name}：${labels[dot.status]}`" @click="selected = dot.key" @keydown.enter.prevent="selected = dot.key" @keydown.space.prevent="selected = dot.key">
                 <circle :r="selected === dot.key ? 9 : 5" :fill="colors[dot.status]" stroke="white" stroke-width="1.5" /><title>{{ dot.name }} · {{ labels[dot.status] }}</title>
               </g>
               <g v-for="[label, place] in anchors" :key="label" :transform="`translate(${xy(place.point).join(',')})`"><circle r="12" fill="#0f172a" /><text text-anchor="middle" dy="4" fill="white" font-size="12">{{ label }}</text><title>{{ place.name }}</title></g>
               <text x="18" y="397" fill="#64748b" font-size="12">GCJ-02 坐标示意 · 无道路底图 · 同坐标不同出口约束可能重叠，可从列表逐一查看</text>
             </svg>
-            <div v-if="discovery" class="replay-legend"><span>蓝线：司机探索路线</span><span>橙色虚线：乘客方向探索路线</span><span v-if="stage === 0">浅紫圈：出口查询范围</span></div>
+            <div v-if="discovery" class="replay-legend"><span>蓝线：司机探索路线</span><span>橙色虚线：乘客方向探索路线</span><span v-if="stage === 0">浅紫圈：候选查询范围</span></div>
             <div class="replay-legend"><span v-for="status in legend" :key="status"><i :style="{ background: colors[status] }" />{{ labels[status] }}</span></div>
           </div>
           <div class="replay-list"><input v-model="query" aria-label="筛选候选点" placeholder="筛选名称、坐标、来源或原因" /><p>{{ filtered.length }} / {{ dots.length }} 条点位记录</p>

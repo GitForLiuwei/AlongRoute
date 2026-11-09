@@ -149,7 +149,7 @@ def test_taxi_only_highway_plan_uses_exit_and_counts_onward_driver_time(monkeypa
     monkeypatch.setattr(AmapClient, "driving", driving)
     monkeypatch.setattr(AmapClient, "nearby", nearby)
     monkeypatch.setattr(AmapClient, "transit", transit)
-    monkeypatch.setattr("app.amap.FocusedDiscovery.run", discover)
+    monkeypatch.setattr("app.amap.HubDiscovery.run", discover)
     result = asyncio.run(calculate_live(request))
     assert seen
     assert all(comparison.label != "从A直接前往C" for comparison in result.comparisons)

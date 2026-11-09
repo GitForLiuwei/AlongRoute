@@ -150,12 +150,12 @@ def test_live_search_does_not_stop_after_six_feasible_taxi_points(monkeypatch):
         return Route(duration_s=600, distance_m=3000, fare_yuan=80 - points.index(origin) * 5 if origin in points else 90,
                      polyline=[origin, destination])
 
-    async def nearby(*args):
+    async def nearby(*args, **kwargs):
         return []
 
     monkeypatch.setattr(AmapClient, "driving", driving)
     monkeypatch.setattr(AmapClient, "nearby", nearby)
-    monkeypatch.setattr("app.amap.build_candidates", lambda *args: [
+    monkeypatch.setattr("app.hub_discovery.build_candidates", lambda *args, **kwargs: [
         Candidate(Place(name=f"P{i}", point=p), "roadside", i * 500, None, 0) for i, p in enumerate(points)])
     result = asyncio.run(calculate_live(request))
     assert len(evaluated) == 9

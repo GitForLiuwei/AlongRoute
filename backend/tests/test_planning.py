@@ -194,7 +194,7 @@ def test_transit_failure_keeps_a_valid_taxi_and_full_trip_time(monkeypatch):
                      fare_yuan=20, distance_m=1000, polyline=[origin, via, destination] if via else [origin, destination],
                      dropoff_duration_s=300 if via else None,
                      segments=[RoadSegment(name="人民路", polyline=[origin, via, destination] if via else [origin, destination])])
-    async def nearby(self, center, keyword):
+    async def nearby(self, center, keyword, radius=None):
         return []
     async def transit(*args):
         raise MapServiceError("test provider failure")
@@ -202,7 +202,7 @@ def test_transit_failure_keeps_a_valid_taxi_and_full_trip_time(monkeypatch):
     monkeypatch.setattr(AmapClient, "driving", driving)
     monkeypatch.setattr(AmapClient, "nearby", nearby)
     monkeypatch.setattr(AmapClient, "transit", transit)
-    monkeypatch.setattr("app.amap.build_candidates", lambda *args: [Candidate(Place(name="P", point=P), "roadside", 1000, None, 0)])
+    monkeypatch.setattr("app.hub_discovery.build_candidates", lambda *args, **kwargs: [Candidate(Place(name="P", point=P), "roadside", 1000, None, 0)])
     result = asyncio.run(calculate_live(request))
     assert len(result.recommendations) == 1
     rec = result.recommendations[0]

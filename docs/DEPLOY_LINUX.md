@@ -30,6 +30,22 @@ bash scripts/deploy-linux.sh
 
 高德控制台需允许实际访问地址。修改前端JS Key后重新运行部署脚本以重建；仅修改后端配置时重启服务即可。
 
+## 本机 OSRM
+
+2026-11-09 已接入现有 `osrm-guangdong` 容器：镜像 `ghcr.io/project-osrm/osrm-backend:v5.27.1`，CH + mmap，table 容量200，宿主机路网目录 `/root/osrm-guangdong`。AlongRoute 的 `backend/.env` 使用：
+
+```dotenv
+OSRM_BASE_URL=http://127.0.0.1:5000
+CANDIDATE_STRATEGY=hub_first
+OSRM_DATA_VERSION=guangdong-car-ch-v5.27.1-hsgr20261109T031719
+```
+
+版本标记使用已观察到的索引文件构建时间，不表示 OSM 原始数据日期。没有改动现有 OSRM 容器或路网。
+
+已用应用坐标转换和矩阵适配器验证两个固定的路网吸附测试点，两个候选均返回 `engine=osrm`，该次矩阵查询约26毫秒；仅验证连接与接口，不代表真实行程的召回质量或延迟分位数。随后重启 `alongroute.service`，服务 active/running，8080健康接口返回HTTP200。后端配置已生效；前端静态发布目录仍沿用现有版本。
+
+如 OSRM 地址变更，更新后端 `.env` 后重启服务。服务未配置或矩阵失败时，候选回退几何粗排，高德最终核验仍执行。
+
 ## 运行维护
 
 ```bash

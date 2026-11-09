@@ -16,7 +16,8 @@ def candidate_trace(candidate):
     return dict(candidate_key=candidate_key(candidate), route_index=candidate.route_index,
                 region=candidate.region, direction=candidate.direction,
                 sample_tier=candidate.sample_tier, origins=candidate.origins,
-                source=candidate.source, discovery_group=candidate.discovery_group)
+                source=candidate.source, discovery_group=candidate.discovery_group,
+                hub_kind=candidate.hub_kind)
 
 
 def select_candidates(primary, surface, limit=MAX_CANDIDATES, surface_reserve=SURFACE_RESERVE):

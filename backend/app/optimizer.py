@@ -10,6 +10,13 @@ MAX_BOARDING_WALK_M = 300
 TAXI_SECONDS_PER_YUAN = 180
 
 
+def execution_key(rec: Recommendation):
+    """Same coordinate is insufficient: onward timetables depend on the actual driver trip."""
+    return (rec.point.point.csv(), rec.shared_ride_s, rec.stop_duration_s,
+            rec.driver_route.duration_s, rec.driver_route.distance_m,
+            tuple(p.csv() for p in rec.driver_route.polyline))
+
+
 def is_viable(option: ModeOption, prefs: Preferences) -> bool:
     if option.mode not in prefs.modes:
         return False
@@ -131,14 +138,14 @@ def rank_recommendations(recs: list[Recommendation], prefs: Preferences) -> list
     if "taxi" not in prefs.modes:
         return transits
     # Independent objectives have no shared numeric score. Interleave the two
-    # shortlists, merging modes at the same point while keeping its first profile.
+    # shortlists, merging modes only for the same executed driver trip.
     selected, by_point = [], {}
     for index in range(max(len(taxis), len(transits))):
         for group in (taxis, transits):
             if index >= len(group):
                 continue
             rec = group[index]
-            key = rec.point.point.csv()
+            key = execution_key(rec)
             if key in by_point:
                 existing = by_point[key]
                 existing.options.extend(o for o in rec.options if o.mode not in {x.mode for x in existing.options})
@@ -149,7 +156,7 @@ def rank_recommendations(recs: list[Recommendation], prefs: Preferences) -> list
     # Keep other individually viable options available in the detail panel.
     for rec in selected:
         for original in recs:
-            if original.point.point.csv() != rec.point.point.csv():
+            if execution_key(original) != execution_key(rec):
                 continue
             for option in original.options:
                 if is_viable(option, prefs) and option.mode not in {o.mode for o in rec.options}:

@@ -108,7 +108,7 @@ def test_provider_failures_are_not_reported_as_no_candidates(monkeypatch, failed
             raise MapServiceError("路线查询失败")
         return Route(duration_s=600, distance_m=1000, polyline=[origin, destination])
 
-    async def nearby(self, center, keyword):
+    async def nearby(self, center, keyword, radius=None):
         if failed_stage == "search":
             raise MapServiceError("地点查询失败")
         return [Place(name="P", point=Point(lon=113.35, lat=23.15), poi_id="stop-1")]

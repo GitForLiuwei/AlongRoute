@@ -16,8 +16,8 @@ TTL_SECONDS = {
     "/v5/place/text": CACHE_TTL_SECONDS,
     "/v5/place/around": CACHE_TTL_SECONDS,
     "/v5/direction/walking": CACHE_TTL_SECONDS,
-    "/v5/direction/driving": CACHE_TTL_SECONDS,
-    "/v5/direction/transit/integrated": CACHE_TTL_SECONDS,
+    "/v5/direction/driving": 180,
+    "/v5/direction/transit/integrated": 300,
 }
 
 
@@ -67,7 +67,8 @@ class MapResponseCache:
     @staticmethod
     def key(credential, path, params):
         # Credentials isolate entries without retaining keys in cache metadata.
-        payload = json.dumps([credential, path, params], sort_keys=True, ensure_ascii=False)
+        # Include TTL policy so old 24-hour driving/transit entries cannot survive a policy change.
+        payload = json.dumps([TTL_SECONDS.get(path, 0), credential, path, params], sort_keys=True, ensure_ascii=False)
         return sha256(payload.encode("utf-8")).digest()
 
     def _remove(self, key):

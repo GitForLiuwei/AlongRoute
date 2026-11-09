@@ -65,9 +65,10 @@ class SearchTrace:
     def emit(self, event, **fields):
         self.sequence += 1
         now = datetime.now(LOCAL_TZ)
-        record = dict(time=now.isoformat(timespec="milliseconds"), search_id=self.id,
-                      kind=self.kind, sequence=self.sequence,
-                      elapsed_ms=round((perf_counter() - self.started) * 1000), event=event, **fields)
+        # Diagnostic payloads cannot overwrite request identity or crash on a reserved field.
+        record = {**fields, "time": now.isoformat(timespec="milliseconds"), "search_id": self.id,
+                  "kind": self.kind, "sequence": self.sequence,
+                  "elapsed_ms": round((perf_counter() - self.started) * 1000), "event": event}
         try:
             # Every event is flushed by the handler, including starts and cancellations.
             _logger(str(LOG_DIR / f"{now:%Y-%m-%d}.jsonl")).info(

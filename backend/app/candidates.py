@@ -31,6 +31,8 @@ class Candidate:
     direction: str = ""
     sample_tier: str = ""
     origins: list[str] = field(default_factory=list)
+    hub_kind: str = ""
+    coarse: dict = field(default_factory=dict)
 
 
 def ordinary_highway(name: str) -> bool:

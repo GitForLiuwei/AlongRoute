@@ -134,6 +134,11 @@ class FocusedDiscovery:
     candidate_limit: int = 48
     surface_reserve: int = 12
     sample_tiers: tuple = SPLIT_SAMPLE_TIERS
+    discovery_budget_s: float = 38
+    include_stations: bool = True
+    passenger_routes: list | None = None
+    exit_limit: int = 6
+    query_limit: int = 24
 
     async def run(self, api, request, routes):
         self.api, self.request, self.routes = api, request, routes
@@ -152,10 +157,10 @@ class FocusedDiscovery:
                 candidate.modes = tuple(request.preferences.modes)
             self.surface_groups.append(group)
         try:
-            await asyncio.wait_for(self.discover(), timeout=38)
+            await asyncio.wait_for(self.discover(), timeout=self.discovery_budget_s)
         except asyncio.TimeoutError:
             self.complete = False
-            self.warnings.append("出口及分流位置搜索达到38秒预算，保留已完成候选；部分出口或站点尚未核验。")
+            self.warnings.append(f"出口及分流位置搜索达到{self.discovery_budget_s:.0f}秒预算，保留已完成候选；部分出口或站点尚未核验。")
         # Restore input order after concurrent work, before any quota truncation.
         def group_key(group):
             first = group[0]
@@ -188,16 +193,16 @@ class FocusedDiscovery:
             return None
 
     async def discover(self):
-        destination_routes = []
+        destination_routes = list(self.passenger_routes or [])
         try:
-            route = await asyncio.wait_for(self.call(self.api.driving, self.request.origin.point,
+            route = None if self.passenger_routes is not None else await asyncio.wait_for(self.call(self.api.driving, self.request.origin.point,
                                                      self.request.passenger_destination.point), timeout=8)
             if route is not None and route.polyline:
                 # Capture choices before concurrent exit queries overwrite the adapter's list.
                 choices = list(self.api.driving_choices) or [route]
                 destination_routes = sorted((r for r in choices if r.polyline),
                                             key=lambda r: r.duration_s)[:2]
-            else:
+            elif self.passenger_routes is None:
                 self.complete = False
                 self.warnings.append("未取得A→C探索路线，仍保留A→B沿途候选。")
         except asyncio.TimeoutError:
@@ -238,7 +243,7 @@ class FocusedDiscovery:
                                         interleave_groups(destination_queries)[:8]]):
             if all(haversine_m(point, old) >= 500 for old in centers):
                 centers.append(point)
-            if len(centers) == 24:
+            if len(centers) == self.query_limit:
                 break
 
         # Bounded geometry for visual diagnostics, not a navigable route export.
@@ -280,7 +285,7 @@ class FocusedDiscovery:
         jobs = []
         for route, q, progress, controlled, anchors in contexts:
             if controlled:
-                selected = exits_around_q(anchors, progress)
+                selected = exits_around_q(anchors, progress)[:self.exit_limit]
                 event("exits_around_q", q=q.model_dump(),
                       exits=[dict(point=a.place.point.model_dump(), name=a.place.name,
                                   side="before" if a.progress_m <= progress else "after") for a in selected])
@@ -299,7 +304,7 @@ class FocusedDiscovery:
                 if any(haversine_m(anchor.place.point, old.place.point) < 300 for old in selected):
                     continue
                 selected.append(anchor)
-                if len(selected) == 3:
+                if len(selected) == min(3, self.exit_limit):
                     break
             event("destination_exits_selected", exits=[a.place.model_dump() for a in selected])
             if not selected and any(controlled_segment(s) for s in route.segments):
@@ -307,7 +312,7 @@ class FocusedDiscovery:
                 self.warnings.append("部分A→C探索路线未找到可核验出口，乘客方向覆盖不完整。")
             jobs.extend(self.explore_exit(route, a, "passenger_split") for a in selected)
         await asyncio.gather(*jobs)
-        if "transit" in self.request.preferences.modes:
+        if self.include_stations and "transit" in self.request.preferences.modes:
             await self.discover_stations()
 
     def annotate(self, candidate, route, region, origin):

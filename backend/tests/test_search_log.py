@@ -55,6 +55,46 @@ def test_successful_search_links_request_result_and_timing(logs):
     assert "driver_route" not in result["recommendations"][0]  # no duplicated raw geometry
 
 
+def test_live_hub_search_with_http_logging_and_replay(logs, monkeypatch):
+    from app.amap import AmapClient
+    from app.models import Place, Point, RoadSegment, Route
+    monkeypatch.setenv('AMAP_WEB_SERVICE_KEY', 'offline-test-key')
+    async def driving(self, origin, destination, via=None):
+        points = [origin, *([via] if via else []), destination]
+        route = Route(duration_s=700 if via else 600, distance_m=10000,
+            polyline=points, dropoff_duration_s=350 if via else None, fare_yuan=12,
+            segments=[RoadSegment(name='普通道路', polyline=points)])
+        self.driving_choices = [route]
+        return route
+    async def nearby(self, center, keyword, radius=None):
+        return [Place(name='枢纽停车场', point=Point(lon=113.35, lat=23.1))] if keyword == '停车场' else []
+    monkeypatch.setattr(AmapClient, 'driving', driving)
+    monkeypatch.setattr(AmapClient, 'nearby', nearby)
+    with TestClient(app) as client:
+        response = client.post('/api/recommend', json=payload())
+        assert response.status_code == 200, response.text
+        assert response.json()['recommendations']
+        replay = client.get('/api/search-replay/' + response.json()['search_id'])
+    data = records(logs)
+    hubs = [r for r in data if r['event'] == 'hub_seeds']
+    assert hubs and any(r['hub_kind'] == 'parking' for r in hubs)
+    assert all(r['kind'] == 'route' for r in data)
+    assert data[-1]['status'] == 'success'
+    assert replay.status_code == 200
+    assert any(r['event'] == 'hub_seeds' and r['hub_kind'] == 'parking' for r in replay.json()['events'])
+
+
+def test_log_payload_cannot_overwrite_request_metadata(logs):
+    trace, token = search_log.start_trace('route')
+    try:
+        search_log.event('diagnostic', kind='subway', search_id='wrong', sequence=-1)
+    finally:
+        search_log.reset_trace(token)
+    record = records(logs)[0]
+    assert record['kind'] == 'route' and record['search_id'] == trace.id
+    assert record['sequence'] == 1
+
+
 def test_place_search_and_validation_failures_are_logged(logs):
     with TestClient(app) as client:
         place = client.get("/api/places/suggest", params={"q": "广州塔"})
