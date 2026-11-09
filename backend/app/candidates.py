@@ -1,5 +1,5 @@
 """Bounded, spatially diverse candidates; coordinates are never parking permission."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import re
 
@@ -25,6 +25,12 @@ class Candidate:
     original_exit: bool = False
     modes: tuple[str, ...] = ("taxi", "transit")
     discovery_group: str = "baseline"
+    route_index: int = 0
+    region: str = ""
+    region_progress_m: float = 0
+    direction: str = ""
+    sample_tier: str = ""
+    origins: list[str] = field(default_factory=list)
 
 
 def ordinary_highway(name: str) -> bool:

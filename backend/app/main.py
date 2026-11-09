@@ -65,6 +65,21 @@ def config():
             "map_proxy_ready": bool(os.getenv("AMAP_JS_SECURITY_CODE", "").strip())}
 
 
+@app.get("/api/search-replay/{identifier}")
+def search_replay(identifier: str, response: Response):
+    from .search_replay import read_replay
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        replay = read_replay(identifier)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(503, "搜索日志暂时无法读取") from exc
+    if replay is None:
+        raise HTTPException(404, "未找到该自动规划日志，可能已轮换清理；地点搜索和手动测算不支持候选回放")
+    return replay
+
+
 @app.get("/api/places/suggest")
 async def places_suggest(q: str = Query(min_length=1, max_length=80)):
     event("place_query", query=q)

@@ -66,10 +66,10 @@ def test_decimal_fares_respect_exact_three_minute_boundary():
     assert rank_recommendations([cheap, fast], Preferences(modes=["taxi"]))[0].id == "fast"
 
 
-def test_top_three_are_ordered_by_combined_score():
-    recs = [candidate(str(index), 90, 20 + index, shared=1000 - 100 * index) for index in range(4)]
+def test_top_six_are_ordered_by_combined_score():
+    recs = [candidate(str(index), 90, 20 + index, shared=1000 - 100 * index) for index in range(8)]
     result = rank_recommendations(list(reversed(recs)), Preferences(modes=["taxi"]))
-    assert [rec.id for rec in result] == ["0", "1", "2"]
+    assert [rec.id for rec in result] == ["0", "1", "2", "3", "4", "5"]
     assert [rec.score for rec in result] == sorted(rec.score for rec in result)
 
 
@@ -165,3 +165,21 @@ def test_live_search_does_not_stop_after_six_feasible_taxi_points(monkeypatch):
     assert result.recommendations[0].dropoff_road == "普通道路"
     assert "元" in result.recommendations[0].comparison
     assert not any("15分钟" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("modes", [["transit"], ["taxi", "transit"]])
+@pytest.mark.parametrize("count", [2, 6, 8])
+def test_recommendation_count_for_transit_and_mixed_modes(modes, count):
+    recs = []
+    for index in range(count):
+        rec = candidate(str(index), 90, 20 + index, shared=1000 - 100 * index,
+                        lon=113.31 + index * .001)
+        transit = transit_candidate(str(index), 1500 - 100 * index, 2 + index).options[0]
+        transit.boarding_stop = rec.point.model_copy(deep=True)
+        rec.options.append(transit)
+        recs.append(rec)
+    result = rank_recommendations(recs, Preferences(modes=modes))
+    assert len(result) == min(count, 6)
+    assert len({rec.point.point.csv() for rec in result}) == len(result)
+    if len(modes) == 2:
+        assert all({option.mode for option in rec.options} == {"taxi", "transit"} for rec in result)

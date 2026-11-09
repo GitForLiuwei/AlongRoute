@@ -9,6 +9,15 @@ from .geometry import haversine_m, point_along_path, project_to_path
 from .highway import ExitAnchor, discovered_exit, exit_was_used, highway_centers, original_exits
 from .models import Place
 from .search_log import event
+from .preselection import select_candidates
+
+
+# Experimental geometry offsets in metres. No new map requests per extra sample.
+SPLIT_SAMPLE_TIERS = (
+    ("near", (15, 30, 60, 80)),
+    ("middle", (150, 200, 300, 400)),
+    ("far", (600, 800, 1000, 1200)),
+)
 
 
 def closest_location(route, destination):
@@ -94,12 +103,12 @@ def common_prefix_end(driver, passenger):
     return maximum
 
 
-def ordinary_near_split(route, progress, before):
+def ordinary_near_split(route, progress, before, offsets=None):
     """Nearest known ordinary point, up to 2 km before/after the split."""
     index = RouteIndex(route)
     if len(index.points) < 2:
         return None
-    for offset in (15, 30, 60, 100, 200, 400, 800, 1200, 2000):
+    for offset in offsets if offsets is not None else (15, 30, 60, 100, 200, 400, 800, 1200, 2000):
         distance = progress - offset if before else progress + offset
         if not 0 <= distance <= index.length:
             continue
@@ -120,36 +129,48 @@ class FocusedDiscovery:
     complete: bool = True
     failed: int = 0
     succeeded: int = 0
+    # Internal experiment controls: set surface_reserve=0 to isolate coverage;
+    # supply a single sample tier to isolate multi-distance sampling.
+    candidate_limit: int = 48
+    surface_reserve: int = 12
+    sample_tiers: tuple = SPLIT_SAMPLE_TIERS
 
     async def run(self, api, request, routes):
         self.api, self.request, self.routes = api, request, routes
+        self.route_order = {id(route): index for index, route in enumerate(routes)}
+        self.surface_groups = []
         self.groups = []
         self.destination_groups = []
         self.station_groups = []
         self.split_points = []
         self.stations = {}
-        self.seen = {}
+        # Geometry-only supplement is available even if later discovery times out.
+        for route in routes:
+            group = build_candidates(route, [], [], request, limit=12)
+            for candidate in group:
+                self.annotate(candidate, route, "ordinary", "baseline_surface")
+                candidate.modes = tuple(request.preferences.modes)
+            self.surface_groups.append(group)
         try:
             await asyncio.wait_for(self.discover(), timeout=38)
         except asyncio.TimeoutError:
             self.complete = False
             self.warnings.append("出口及分流位置搜索达到38秒预算，保留已完成候选；部分出口或站点尚未核验。")
-        # Give every exit and transport mode a turn before using the 48 slots.
-        taxi = interleave_groups([interleave_groups(self.groups),
-                                  interleave_groups(self.destination_groups)])
-        transit = interleave_groups([
-            interleave_groups([g for g in self.station_groups if g[0].discovery_group != "passenger_split"]),
-            interleave_groups([g for g in self.station_groups if g[0].discovery_group == "passenger_split"])])
-        for candidate in interleave_groups([taxi, transit]):
-            key = (candidate.place.point.csv(), candidate.approach.csv() if candidate.approach else "",
-                   candidate.exit_place.point.csv() if candidate.exit_place else "")
-            if key in self.seen:
-                continue
-            self.seen[key] = candidate
-            self.candidates.append(candidate)
-            if len(self.candidates) >= 48:
-                self.complete = False
-                break
+        # Restore input order after concurrent work, before any quota truncation.
+        def group_key(group):
+            first = group[0]
+            return (first.route_index, first.region_progress_m, first.region, first.approach.csv() if first.approach else "", first.place.point.csv())
+        for groups in (self.groups, self.destination_groups, self.station_groups):
+            groups[:] = sorted((g for g in groups if g), key=group_key)
+        legacy = interleave_groups([
+            interleave_groups([interleave_groups(self.groups), interleave_groups(self.destination_groups)]),
+            interleave_groups([
+                interleave_groups([g for g in self.station_groups if g[0].discovery_group != "passenger_split"]),
+                interleave_groups([g for g in self.station_groups if g[0].discovery_group == "passenger_split"])])])
+        self.candidates, truncated = select_candidates(legacy, interleave_groups(self.surface_groups),
+                                                       limit=self.candidate_limit, surface_reserve=self.surface_reserve)
+        if truncated:
+            self.complete = False
         if self.failed:
             self.complete = False
             self.warnings.append("部分出口或接驳查询失败，本次搜索覆盖不完整。")
@@ -220,24 +241,42 @@ class FocusedDiscovery:
             if len(centers) == 24:
                 break
 
+        # Bounded geometry for visual diagnostics, not a navigable route export.
+        def overview(route):
+            points = route.polyline
+            stride = max(1, (len(points) + 198) // 199)
+            sampled = points[::stride]
+            if points and sampled[-1] != points[-1]:
+                sampled.append(points[-1])
+            return [p.model_dump() for p in sampled]
+        event("discovery_map", driver_routes=[overview(route) for route in self.routes],
+              passenger_routes=[overview(route) for route in destination_routes],
+              search_centers=[p.model_dump() for p in centers], search_radius_m=1500)
+
         async def find_exits(point):
-            places = await self.call(self.api.nearby, point, "出口", radius=1500)
-            for place in places or []:
-                for route, _, _, controlled, anchors in contexts:
-                    if controlled:
-                        anchor = discovered_exit(route, place)
-                        if anchor and not any(haversine_m(anchor.place.point, a.place.point) < 80 for a in anchors):
-                            anchors.append(anchor)
-                for route, anchors in destination_contexts:
-                    anchor = discovered_exit(route, place)
-                    if anchor and not any(haversine_m(anchor.place.point, a.place.point) < 80 for a in anchors):
-                        anchor.original = False
-                        anchors.append(anchor)
+            return await self.call(self.api.nearby, point, "出口", radius=1500)
+        tasks = [asyncio.create_task(find_exits(point)) for point in centers]
         try:
-            await asyncio.wait_for(asyncio.gather(*(find_exits(p) for p in centers)), timeout=12)
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=12)
         except asyncio.TimeoutError:
             self.complete = False
             self.warnings.append("出口发现达到预算，Q前后各三个出口可能未找齐。")
+        finally:
+            # Also harvest completed tasks if the enclosing 38-second budget expires.
+            for task in tasks:
+                if not task.done() or task.cancelled() or task.exception() is not None:
+                    continue
+                for place in sorted(task.result() or [], key=lambda p: (p.point.csv(), p.name)):
+                    for route, _, _, controlled, anchors in contexts:
+                        if controlled:
+                            anchor = discovered_exit(route, place)
+                            if anchor and not any(haversine_m(anchor.place.point, a.place.point) < 80 for a in anchors):
+                                anchors.append(anchor)
+                    for route, anchors in destination_contexts:
+                        anchor = discovered_exit(route, place)
+                        if anchor and not any(haversine_m(anchor.place.point, a.place.point) < 80 for a in anchors):
+                            anchor.original = False
+                            anchors.append(anchor)
         jobs = []
         for route, q, progress, controlled, anchors in contexts:
             if controlled:
@@ -251,7 +290,8 @@ class FocusedDiscovery:
                 jobs.extend(self.explore_exit(route, anchor) for anchor in selected)
             else:
                 jobs.append(self.explore_surface(route, q, progress))
-        for route, anchors in destination_contexts:
+        for index, (route, anchors) in enumerate(destination_contexts, start=len(self.routes)):
+            self.route_order[id(route)] = index
             # One landing may have several POI labels. Keep three distinct exit areas.
             selected = []
             for anchor in sorted(anchors, key=lambda a: haversine_m(
@@ -269,6 +309,13 @@ class FocusedDiscovery:
         await asyncio.gather(*jobs)
         if "transit" in self.request.preferences.modes:
             await self.discover_stations()
+
+    def annotate(self, candidate, route, region, origin):
+        candidate.route_index = self.route_order.get(id(route), 0)
+        candidate.region = region
+        candidate.region_progress_m = (project_to_path(candidate.exit_place.point, route.polyline)[1]
+                                       if candidate.exit_place else candidate.progress_m)
+        candidate.origins = [origin]
 
     def candidate(self, route, point, anchor=None, source="roadside", modes=None, citycode=None):
         _, progress, _ = project_to_path(point, route.polyline)
@@ -315,21 +362,28 @@ class FocusedDiscovery:
             self.complete = False
             return
         group = []
-        for branch, before in ((to_b, True), (to_b, False), (to_c, False)):
-            point = ordinary_near_split(branch, split, before)
-            if point is None or any(haversine_m(point, c.place.point) < 5 for c in group):
-                continue
-            if not exit_was_used(driven, actual, point):
-                # C-branch points need not occur on the E->B route; final verification
-                # checks the complete constrained route for every branch individually.
-                _, landing_progress, gap = project_to_path(landing.place.point, branch.polyline)
-                _, point_progress, _ = project_to_path(point, branch.polyline)
-                if gap > 30 or point_progress <= landing_progress:
+        station_directions = set()
+        # Round-robin over directions within each scale, keeping the old near
+        # candidates first. Each scale searches independently; no near-point fallback.
+        for tier, offsets in self.sample_tiers:
+            for direction, branch, before in (("before", to_b, True), ("to_b", to_b, False), ("to_c", to_c, False)):
+                point = ordinary_near_split(branch, split, before, offsets)
+                if point is None or any(haversine_m(point, c.place.point) < 5 for c in group):
                     continue
-            candidate = self.candidate(baseline, point, actual)
-            candidate.discovery_group = discovery_group
-            group.append(candidate)
-            self.split_points.append((baseline, candidate))
+                if not exit_was_used(driven, actual, point):
+                    _, landing_progress, gap = project_to_path(landing.place.point, branch.polyline)
+                    _, point_progress, _ = project_to_path(point, branch.polyline)
+                    if gap > 30 or point_progress <= landing_progress:
+                        continue
+                candidate = self.candidate(baseline, point, actual)
+                candidate.discovery_group = discovery_group
+                self.annotate(candidate, baseline, f"exit:{actual.place.point.csv()}", discovery_group)
+                candidate.direction, candidate.sample_tier = direction, tier
+                group.append(candidate)
+                # One representative per direction, even when its near tier is unusable.
+                if direction not in station_directions:
+                    station_directions.add(direction)
+                    self.split_points.append((baseline, candidate))
         if group:
             (self.destination_groups if discovery_group == "passenger_split" else self.groups).append(group)
         event("exit_split_discovered", exit=actual.place.model_dump(),
@@ -343,6 +397,8 @@ class FocusedDiscovery:
         candidates = build_candidates(route, parking, [], self.request, limit=12)
         if terminal_is_usable(route.model_copy(update={"polyline": [q]}), q, True):
             candidates.insert(0, self.candidate(route, q))
+        for candidate in candidates:
+            self.annotate(candidate, route, "surface_q", "surface_q")
         self.groups.append(candidates)
         self.split_points.extend((route, c) for c in candidates[:3])
 
@@ -351,16 +407,17 @@ class FocusedDiscovery:
         # and the existing walking API still enforces the actual 300-m entrance cap.
         async def find(route, candidate, kind):
             places = await self.call(self.api.nearby, candidate.place.point, kind, radius=5000)
+            places = sorted(places or [], key=lambda p: (haversine_m(p.point, candidate.place.point), p.point.csv(), p.name))
             selected = []
             for place in places or []:
                 if haversine_m(place.point, candidate.place.point) > 5000:
                     continue
                 station = Station(place, "bus" if kind == "公交站" else "subway")
                 key = (place.point.csv(), candidate.exit_place.point.csv() if candidate.exit_place else "")
-                if key not in self.stations:
-                    self.stations[key] = (route, candidate, station)
-                    selected.append(key)
+                selected.append((key, (route, candidate, station)))
             return selected
+        self.split_points.sort(key=lambda item: (
+            item[1].route_index, item[1].region_progress_m, item[1].region, item[1].direction, item[1].place.point.csv()))
         areas = interleave_groups([
             [item for item in self.split_points if item[1].discovery_group != "passenger_split"],
             [item for item in self.split_points if item[1].discovery_group == "passenger_split"]])
@@ -368,7 +425,11 @@ class FocusedDiscovery:
                 for kind in ("地铁站", "公交站")]
         groups = await asyncio.gather(*jobs)
         # Round-robin by area and station kind so one dense bus area cannot take all slots.
-        keys = list(dict.fromkeys(interleave_groups(groups)))
+        keys = []
+        for key, value in interleave_groups(groups):
+            if key not in self.stations:
+                self.stations[key] = value
+                keys.append(key)
         if len(keys) > 12:
             self.complete = False
         await asyncio.gather(*(self.station_approach(*self.stations[key]) for key in keys[:12]))
@@ -389,8 +450,12 @@ class FocusedDiscovery:
             if anchor and not exit_was_used(route, anchor, point):
                 continue
             found = self.candidate(baseline, point, anchor, "station_area", ("transit",), station.place.citycode)
+            self.annotate(found, baseline, f"{candidate.region}:station:{station.place.point.csv()}", "station_approach")
+            found.direction = candidate.direction
             found.discovery_group = candidate.discovery_group
             found.place.name = f"{station.place.name}附近道路"[:120]
+            if any(found.place.point.csv() == old.place.point.csv() for old in group):
+                continue
             group.append(found)
             if len(group) == 2:
                 break

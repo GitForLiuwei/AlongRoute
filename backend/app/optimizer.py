@@ -5,6 +5,7 @@ from .models import ModeOption, Preferences, Recommendation
 from .search_log import event, recommendation_summary
 
 
+MAX_RECOMMENDATIONS = 6
 MAX_BOARDING_WALK_M = 300
 TAXI_SECONDS_PER_YUAN = 180
 
@@ -107,7 +108,7 @@ def rank_taxi_recommendations(recs: list[Recommendation], prefs: Preferences) ->
         taxi_score_seconds(rec.driver_detour_s, rec.options[0]),
         rec.driver_detour_s + rec.options[0].total_duration_s,
         rec.options[0].fare_yuan, rec.driver_detour_s, rec.id))
-    selected = ordered[:3]
+    selected = ordered[:MAX_RECOMMENDATIONS]
     for index, rec in enumerate(selected):
         option = rec.options[0]
         rec.score = float(taxi_score_seconds(rec.driver_detour_s, option) / 60)
@@ -141,7 +142,7 @@ def rank_recommendations(recs: list[Recommendation], prefs: Preferences) -> list
             if key in by_point:
                 existing = by_point[key]
                 existing.options.extend(o for o in rec.options if o.mode not in {x.mode for x in existing.options})
-            elif len(selected) < 3:
+            elif len(selected) < MAX_RECOMMENDATIONS:
                 by_point[key] = rec
                 selected.append(rec)
     # The shortlist chooses a suggested mode, not the only available mode at P.
@@ -243,6 +244,6 @@ def _rank_transit_recommendations(recs: list[Recommendation], prefs: Preferences
             continue
         families.add(family)
         selected.append(rec)
-        if len(selected) == 3:
+        if len(selected) == MAX_RECOMMENDATIONS:
             break
     return selected

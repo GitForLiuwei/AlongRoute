@@ -139,10 +139,17 @@ def test_taxi_only_highway_plan_uses_exit_and_counts_onward_driver_time(monkeypa
         return []
     async def transit(*args):
         raise AssertionError("Taxi-only planning must never enforce transit access")
+    async def discover(self, *args):
+        # Isolate complete-trip evaluation from candidate discovery. Ordinary-road
+        # supplements legitimately use a single P waypoint rather than an exit.
+        self.candidates = [Candidate(Place(name="P", point=P), "parking", 5000, None, 0,
+            exit_place=Place(name="实际出口", point=E), approach=Point(lon=113.34, lat=23.1),
+            original_exit=True, modes=("taxi",))]
+        return self
     monkeypatch.setattr(AmapClient, "driving", driving)
     monkeypatch.setattr(AmapClient, "nearby", nearby)
     monkeypatch.setattr(AmapClient, "transit", transit)
-    monkeypatch.setattr("app.amap.build_candidates", lambda *args: [Candidate(Place(name="P", point=P), "parking", 5000, None, 0)])
+    monkeypatch.setattr("app.amap.FocusedDiscovery.run", discover)
     result = asyncio.run(calculate_live(request))
     assert seen
     assert all(comparison.label != "从A直接前往C" for comparison in result.comparisons)

@@ -8,6 +8,7 @@ import MapCanvas from './components/MapCanvas.vue'
 import TransitItinerary from './components/TransitItinerary.vue'
 import DriverItinerary from './components/DriverItinerary.vue'
 import ManualDropoffPanel from './components/ManualDropoffPanel.vue'
+import CandidateReplay from './components/CandidateReplay.vue'
 import { apiGet, apiPost, duration, detourDuration, distance, coordinates, fare, arrival, type Place, type Priority, type Mode,
   type Recommendation, type RecommendationResponse, type RecommendationRequest } from './lib/api'
 
@@ -234,6 +235,8 @@ onMounted(async () => {
           <div v-if="result?.warnings?.length" class="notice caution-notice"><ShieldAlert :size="18" /><div><strong>{{ result.mode === 'demo' ? '当前是模拟演示，不可用于真实出行' : '结果仅为待确认候选' }}</strong><p v-for="warning in result.warnings" :key="warning">{{ warning }}</p></div></div>
           <div v-if="!result && !error" class="empty-state"><MapPin :size="26"/><strong>填写行程，开始智能规划</strong><p>先比较司机绕路成本，再计算乘客后续交通方案。</p></div>
           <div v-else-if="result && !result.recommendations.length" class="empty-state"><BadgeHelp :size="28"/><strong>暂无符合条件的候选点</strong><p>请先检查搜索是否完成及服务状态，再考虑调整行程；仅公交 / 地铁方案的到站步行上限为300米。</p></div>
+
+          <CandidateReplay :search-id="result?.search_id" />
 
           <div v-if="result?.recommendations.length" class="result-grid">
             <button v-for="(r, idx) in result.recommendations" :key="r.id" class="recommendation-card" :class="{ picked: active?.id === r.id }" @click="pick(r)">

@@ -18,6 +18,7 @@ from .candidates import (Candidate, Station, build_candidates, search_centers, t
 from .highway import ExitAnchor, highway_centers, original_exits, discovered_exit, exit_was_used
 from .exit_discovery import FocusedDiscovery, closest_location
 from .transit import coordinates, parse_itinerary
+from .preselection import candidate_trace
 from .search_log import event, recommendation_summary
 from .map_cache import response_cache
 from time import perf_counter
@@ -340,7 +341,7 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
             candidates = discovery.candidates
             complete = discovery.complete
             warnings.extend(dict.fromkeys(discovery.warnings))
-            warnings.append("高速、快速路和高架统一按Q前后各最多三个出口搜索，围绕出口后去B与C的首次分流位置生成普通道路候选；公交站点在候选周围5公里搜索。")
+            warnings.append("高速、快速路和高架按Q前后各最多三个出口搜索，在分流前后按近、中、远距离生成候选，并补充原路线普通道路；公交站点在各方向代表点周围5公里搜索。")
             warnings.append("同时沿最多两条A→C探索路线寻找靠近乘客目的地的出口，每条最多三个；两批候选统一核算完整A→P→B的司机增加时间及乘客后续费用。")
             warnings.append("出口前后的相对位置按司机行驶顺序计算，Q仅用于定位搜索区域；每个候选仍核验实际驶出及完整A→P→B路线。")
             if discovery.failed and not candidates and not discovery.succeeded:
@@ -640,6 +641,8 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                                    discovery_group=c.discovery_group) for c in candidates])
         errors, results = [], []
         evaluated_count = 0
+        evaluated_regions = set()
+        required_regions = {(c.route_index, c.region) for c in candidates if c.region}
 
         async def onward_options(place, at, modes=None):
             modes = request.preferences.modes if modes is None else modes
@@ -666,10 +669,11 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
         async def evaluate(candidate):
             nonlocal evaluated_count
             evaluated_count += 1
+            evaluated_regions.add((candidate.route_index, candidate.region))
             place = candidate.place
-            event("candidate_started", point=place.model_dump(mode="json"), source=candidate.source)
+            event("candidate_started", point=place.model_dump(mode="json"), **candidate_trace(candidate))
             def reject(reason, **fields):
-                event("candidate_rejected", point=place.model_dump(mode="json"), reason=reason, **fields)
+                event("candidate_rejected", point=place.model_dump(mode="json"), reason=reason, **candidate_trace(candidate), **fields)
             try:
                 waypoints = [candidate.approach, candidate.exit_place.point, place.point] if candidate.exit_place and candidate.approach else place.point
                 driver = await api.driving(request.origin.point, request.driver_destination.point, via=waypoints)
@@ -726,7 +730,7 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                     shared_ride_s=shared, stop_duration_s=stop_s, candidate_source=candidate.source,
                     options=options, suggested_mode=options[0].mode, score=0,
                     reason="连续途经路线估算；到P时间按途经路段内进度估算，停靠条件待核实"))
-                event("candidate_accepted", recommendation=recommendation_summary(results[-1]))
+                event("candidate_accepted", recommendation=recommendation_summary(results[-1]), **candidate_trace(candidate))
             except asyncio.CancelledError:
                 reject("evaluation_cancelled_or_budget_exhausted")
                 raise
@@ -750,7 +754,9 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                 covered_modes = {option.mode for result in results for option in result.options}
                 # With taxi enabled, continue across the bounded candidate pool:
                 # six feasible points do not establish the detour/fare frontier.
-                if "taxi" not in pools and len(results) >= 6 and set(request.preferences.modes) <= covered_modes:
+                if ("taxi" not in pools and len(results) >= 6
+                        and set(request.preferences.modes) <= covered_modes
+                        and required_regions <= evaluated_regions):
                     break
             # Refine around the station actually used by successful itineraries.
             # This is separate from arbitrary nearby station POIs discovered earlier.
@@ -824,6 +830,8 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
         if not comparisons:
             warnings.append("本次未取得符合接驳约束的对照方案，无法判断中途下车是否优于直接出行。")
         if evaluated_count < len(candidates):
+            for candidate in candidates[evaluated_count:]:
+                event("candidate_not_evaluated", reason="early_stop_or_planning_budget", **candidate_trace(candidate))
             warnings.append("已保留足够可用候选，剩余候选尚未精算，推荐不代表全局最优。")
         if not ranked:
             warnings.append("已搜索范围内暂无符合限制的候选，不代表所有路线均无方案；公交接驳不会自动放宽300米限制。" if "transit" in request.preferences.modes else "已搜索范围内暂无同时满足司机增加时间和乘客打车费用上限的候选；打车不要求靠近公交或地铁。")
