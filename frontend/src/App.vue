@@ -15,7 +15,7 @@ import { apiGet, apiPost, duration, detourDuration, distance, coordinates, fare,
 const origin = ref<Place | null>({ name: '乐从中学', point: { lon: 113.105351, lat: 22.940194 }, citycode: '0757', poi_id: 'B02F5076M7' })
 const driverDestination = ref<Place | null>({ name: '惠阳区新圩镇东风村卫生站', point: { lon: 114.306364, lat: 22.825135 }, citycode: '0752', poi_id: 'B02F00QI66' })
 const passengerDestination = ref<Place | null>({ name: '里城玺樾山', point: { lon: 114.122363, lat: 22.627733 }, citycode: '0755', poi_id: 'B0FFJ3JUUX' })
-const detour = ref(5)
+const detour = ref(180)
 const manualMode = ref(false)
 const taxiFareLimit = ref(200)
 const selectedModes = ref<Mode[]>(['taxi', 'transit'])
@@ -192,7 +192,7 @@ onMounted(async () => {
           <button :class="{ active: priority === 'time' }" @click="priority = 'time'">省时间</button>
           <button :class="{ active: priority === 'cost' }" @click="priority = 'cost'">省费用</button>
         </div>
-        <p v-if="!manualMode && selectedModes.includes('taxi')" class="transit-rule">打车按司机增加时间、乘客全程时间和车费综合推荐：多花1元，若能让司机与乘客合计省至少3分钟，就优先省时。费用上限与司机绕路上限仍生效。</p>
+        <p v-if="!manualMode && selectedModes.includes('taxi')" class="transit-rule">打车按所选偏好综合比较司机增加时间、乘客全程时间和车费：省时间更重视耗时，省费用更重视车费，均衡兼顾两者。费用上限与司机绕路上限仍生效。</p>
         <div v-if="!manualMode" class="extra-grid">
           <label>公交全程步行上限<select v-model.number="walkLimit"><option :value="500">500 米</option><option :value="1000">1000 米</option><option :value="1200">1200 米</option><option :value="2000">2000 米</option></select></label>
           <label>最大换乘次数<select v-model.number="transfers"><option :value="0">不换乘</option><option :value="1">1 次</option><option :value="2">2 次</option><option :value="3">3 次</option></select></label>
@@ -241,6 +241,7 @@ onMounted(async () => {
           <div v-if="result?.recommendations.length" class="result-grid">
             <button v-for="(r, idx) in result.recommendations" :key="r.id" class="recommendation-card" :class="{ picked: active?.id === r.id }" @click="pick(r)">
               <div class="card-header"><span class="card-index">0{{ idx + 1 }}</span><span class="card-title">{{ r.point.name }}</span><span v-if="r.recommendation_label || idx === 0" class="best-chip">{{ r.recommendation_label || (snapshot?.preferences.priority === 'cost' ? '费用优选' : snapshot?.preferences.priority === 'time' ? '时间优选' : '综合优选') }}</span></div>
+              <p class="card-driver-total"><span>司机总时间（含停靠）</span><strong>{{ duration(r.driver_route.duration_s + r.stop_duration_s) }}</strong></p>
               <div class="card-stats"><div><span>司机增加约</span><strong class="green-stat">+{{ detourDuration(r.driver_detour_s) }}</strong></div><div><span>乘客全程</span><strong>{{ duration(r.options.find(x => x.mode === r.suggested_mode)?.total_duration_s ?? 0) }}</strong></div><div><span>后续费用</span><strong>{{ fare(r.options.find(x => x.mode === r.suggested_mode)?.fare_yuan ?? null) }}</strong></div></div>
               <p class="card-location">P · {{ coordinates(r.point.point) }}</p>
               <p v-if="r.options.find(x => x.mode === r.suggested_mode)?.mode === 'transit'" class="card-access">到站步行 {{ r.options.find(x => x.mode === 'transit')?.boarding_walk_m }} 米 · 公交 / 地铁</p>

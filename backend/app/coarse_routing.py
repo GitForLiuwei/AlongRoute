@@ -35,11 +35,17 @@ def taxi_priority(candidate):
 
 def transit_priority(candidate, destination):
     e = candidate.coarse
-    # Road travel to C is not a proxy for rail travel. Keep independent hub coverage.
-    return e['detour_s'] + e['shared_s'] + haversine_m(candidate.place.point, destination) / 15
+    dist_m = haversine_m(candidate.place.point, destination)
+    if candidate.hub_kind == 'subway':
+        onward_est_s = dist_m / 8.5 + 300
+    elif candidate.hub_kind == 'bus':
+        onward_est_s = dist_m / 4.5 + 420
+    else:
+        onward_est_s = dist_m / 10.0 + 360
+    return e['detour_s'] + e['shared_s'] + onward_est_s
 
 
-def coverage_order(candidates, destination, modes):
+def _interleave_coverage(candidates, destination, modes):
     groups = {}
     for candidate in candidates:
         kind = candidate.hub_kind or candidate.source
@@ -62,6 +68,23 @@ def coverage_order(candidates, destination, modes):
     return ordered
 
 
+def coverage_order(candidates, destination, modes, max_detour_s: float | None = None):
+    if max_detour_s is None:
+        return _interleave_coverage(candidates, destination, modes)
+    soft_limit_s = max_detour_s * 1.5 + 180
+    feasible, overflow = [], []
+    for c in candidates:
+        stop_s = 180 if c.source == 'parking' else 90
+        detour_s = (c.coarse.get('detour_s') or 0) + stop_s
+        if detour_s <= soft_limit_s:
+            feasible.append(c)
+        else:
+            overflow.append(c)
+    if not feasible or not overflow:
+        return _interleave_coverage(candidates, destination, modes)
+    return _interleave_coverage(feasible, destination, modes) + _interleave_coverage(overflow, destination, modes)
+
+
 async def estimate_candidates(api, request, routes, candidates):
     for candidate in candidates:
         candidate.coarse = geometry_estimate(candidate, routes, request.passenger_destination.point)
@@ -70,7 +93,7 @@ async def estimate_candidates(api, request, routes, candidates):
         try:
             estimates = await asyncio.wait_for(OsrmClient(api.client, url).estimate(
                 request.origin.point, request.driver_destination.point, request.passenger_destination.point,
-                [c.place.point for c in candidates]), timeout=4)
+                [c.place.point for c in candidates]), timeout=6)
         except asyncio.TimeoutError:
             estimates = []
         for i, candidate in enumerate(candidates):
@@ -85,4 +108,5 @@ async def estimate_candidates(api, request, routes, candidates):
         candidate.estimate_s = taxi_priority(candidate)
         event('candidate_coarse', point=candidate.place.model_dump(mode='json'),
               estimate=candidate.coarse, **candidate_trace(candidate))
-    return coverage_order(candidates, request.passenger_destination.point, request.preferences.modes)
+    max_detour_s = request.preferences.max_detour_minutes * 60
+    return coverage_order(candidates, request.passenger_destination.point, request.preferences.modes, max_detour_s=max_detour_s)

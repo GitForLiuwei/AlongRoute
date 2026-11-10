@@ -454,7 +454,7 @@ class FocusedDiscovery:
                                  candidate.original_exit) if candidate.exit_place else None)
             if anchor and not exit_was_used(route, anchor, point):
                 continue
-            found = self.candidate(baseline, point, anchor, "station_area", ("transit",), station.place.citycode)
+            found = self.candidate(baseline, point, anchor, "station_area", tuple(self.request.preferences.modes), station.place.citycode)
             self.annotate(found, baseline, f"{candidate.region}:station:{station.place.point.csv()}", "station_approach")
             found.direction = candidate.direction
             found.discovery_group = candidate.discovery_group

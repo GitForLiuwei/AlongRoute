@@ -14,3 +14,5 @@
 .boarding-summary svg { flex-shrink: 0; margin-top: 2px; }
 .boarding-summary p { margin: 5px 0 0; line-height: 1.7; }
 .detail-modes:has(> :only-child) { grid-template-columns: 1fr; }
+.card-driver-total { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px; margin: 15px 0 0; color: #627587; font-size: 11px; }
+.card-driver-total strong { color: #2865a8; font-size: 14px; }

@@ -10,6 +10,10 @@ from .geometry import haversine_m
 from .models import Point
 
 
+MAX_ENDPOINT_SNAP_M = 300
+MAX_CANDIDATE_SNAP_M = 250
+
+
 @dataclass
 class MatrixEstimate:
     shared_s: float | None = None
@@ -26,7 +30,7 @@ def nonnegative(value):
 
 
 class OsrmClient:
-    def __init__(self, client: httpx.AsyncClient, url: str, timeout=1.5, batch_size=80):
+    def __init__(self, client: httpx.AsyncClient, url: str, timeout=2.5, batch_size=80):
         self.client, self.url, self.timeout = client, url.rstrip('/'), timeout
         self.batch_size = max(1, min(batch_size, 80))  # 83 locations incl. A/B/C.
 
@@ -44,13 +48,15 @@ class OsrmClient:
 
         async def table(sources, destinations):
             response = await self.client.get(url, params={
-                'sources': ';'.join(map(str, sources)), 'destinations': ';'.join(map(str, destinations)),
-                'annotations': 'duration,distance', 'radiuses': ';'.join(['80'] * len(coords)),
+                'sources': ';'.join(map(str, sources)),
+                'destinations': ';'.join(map(str, destinations)),
+                'annotations': 'duration,distance',
             }, timeout=self.timeout)
             response.raise_for_status()
             data = response.json()
             if not isinstance(data, dict) or data.get('code') != 'Ok':
                 raise ValueError('unsupported_or_unavailable')
+            remote_candidates = set()
             for key, order in (('sources', sources), ('destinations', destinations)):
                 waypoints = data.get(key)
                 if not isinstance(waypoints, list) or len(waypoints) != len(order):
@@ -60,8 +66,12 @@ class OsrmClient:
                     if not isinstance(location, list) or len(location) != 2:
                         raise ValueError('invalid_waypoints')
                     snapped = Point(lon=location[0], lat=location[1])
-                    if haversine_m(coords[index], snapped) > 80:
-                        raise ValueError('remote_snap')
+                    snap_m = haversine_m(coords[index], snapped)
+                    if index < 3:
+                        if snap_m > MAX_ENDPOINT_SNAP_M:
+                            raise ValueError('remote_snap')
+                    elif snap_m > MAX_CANDIDATE_SNAP_M:
+                        remote_candidates.add(index)
             for key in ('durations', 'distances'):
                 matrix = data.get(key)
                 if not isinstance(matrix, list) or len(matrix) != len(sources) or any(
@@ -69,17 +79,24 @@ class OsrmClient:
                     raise ValueError('invalid_matrix')
             if data.get('fallback_speed_cells'):
                 raise ValueError('fallback_cells')
-            return data
+            return data, remote_candidates
 
         try:
             # Bound both requests as a unit and cancel siblings on timeout.
-            first, second = await asyncio.wait_for(asyncio.gather(
-                table([0], [1, *indices]), table(indices, [1, 2]), return_exceptions=True), self.timeout + .2)
-            if isinstance(first, Exception) or isinstance(second, Exception):
+            first_res, second_res = await asyncio.wait_for(asyncio.gather(
+                table([0], [1, *indices]), table(indices, [1, 2]), return_exceptions=True), self.timeout + .3)
+            if isinstance(first_res, Exception) or isinstance(second_res, Exception):
                 raise ValueError('matrix_request_failed')
+            first, remote_first = first_res
+            second, remote_second = second_res
+            remote_all = remote_first | remote_second
             base = nonnegative(first['durations'][0][0])
             result = []
             for i in range(len(points)):
+                coord_index = i + 3
+                if coord_index in remote_all:
+                    result.append(MatrixEstimate(missing_reason='remote_snap'))
+                    continue
                 shared = nonnegative(first['durations'][0][i + 1])
                 to_b, onward = map(nonnegative, second['durations'][i])
                 distance = nonnegative(second['distances'][i][1])

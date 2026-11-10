@@ -34,13 +34,15 @@ def itinerary(duration=600, walking=200, transfers=0, kind="公交线路", entra
             "walking_distance": str(walking), "segments": segments}
 
 
-def run_transit(monkeypatch, items, access=200):
+def run_transit(monkeypatch, items, access=200, walking_calls=None, access_duration_s=100):
     async def fake_get(self, path, **params):
         return {"route": {"transits": items}}
 
     async def walking(self, origin, destination):
+        if walking_calls is not None:
+            walking_calls.append((origin, destination))
         assert destination == STOP  # The selected itinerary's stop, not any nearby POI.
-        return None if access is None else Route(duration_s=100, distance_m=access,
+        return None if access is None else Route(duration_s=access_duration_s, distance_m=access,
                                                  polyline=[origin, destination])
 
     monkeypatch.setattr(AmapClient, "get", fake_get)
@@ -237,7 +239,9 @@ def test_replacement_can_push_whole_trip_over_walking_limit(monkeypatch):
 def test_unknown_access_time_cannot_reuse_timetable(monkeypatch):
     item = itinerary()
     item["segments"][0]["walking"].pop("cost")
-    assert run_transit(monkeypatch, [item]) == []
+    walking_calls = []
+    assert run_transit(monkeypatch, [item], walking_calls=walking_calls) == []
+    assert walking_calls == []
 
 
 def test_unknown_road_metadata_is_not_usable():
@@ -302,7 +306,13 @@ def test_taxi_cost_preference_has_no_passenger_time_budget():
     assert rank_recommendations([slow, fast], Preferences(priority="cost"))[0].id == "slow"
 
 
-def test_slower_access_cannot_reuse_an_unreachable_timetable(monkeypatch):
-    item = itinerary()
-    item["segments"][0]["walking"]["cost"]["duration"] = "10"
-    assert run_transit(monkeypatch, [item]) == []
+@pytest.mark.parametrize("kind,delta_s,accepted", [
+    ("公交线路", 30, True), ("公交线路", 31, False),
+    ("地铁线路", 31, True), ("地铁线路", 120, True), ("地铁线路", 121, False),
+])
+def test_access_tolerance_depends_on_boarding_kind(monkeypatch, kind, delta_s, accepted):
+    item = itinerary(kind=kind)
+    options = run_transit(monkeypatch, [item], access_duration_s=100 + delta_s)
+    assert bool(options) is accepted
+    if accepted:
+        assert options[0].duration_s == 600 + delta_s

@@ -1,13 +1,23 @@
 import math
 from decimal import Decimal
 
+from .geometry import haversine_m
 from .models import ModeOption, Preferences, Recommendation
 from .search_log import event, recommendation_summary
 
-
 MAX_RECOMMENDATIONS = 6
 MAX_BOARDING_WALK_M = 300
-TAXI_SECONDS_PER_YUAN = 180
+TAXI_SECONDS_PER_YUAN = Decimal(108)
+
+# 三档打车偏好权重: (司机绕行秒权重 w_driver, 乘客全程秒权重 w_pax, 每1元折合秒数 sec_per_yuan)
+# - balanced (均衡): 1.5 * 司机增加分钟 + 1.0 * 乘客全程分钟 + 1.8 * 车费(元) (1元 = 108秒)
+# - time     (省时): 1.5 * 司机增加分钟 + 1.5 * 乘客全程分钟 + 0.8 * 车费(元) (1元 = 48秒)
+# - cost     (省费): 1.2 * 司机增加分钟 + 0.8 * 乘客全程分钟 + 3.0 * 车费(元) (1元 = 180秒)
+TAXI_WEIGHTS = {
+    "balanced": (Decimal("1.5"), Decimal("1.0"), Decimal("108")),
+    "time":     (Decimal("1.5"), Decimal("1.5"), Decimal("48")),
+    "cost":     (Decimal("1.2"), Decimal("0.8"), Decimal("180")),
+}
 
 
 def execution_key(rec: Recommendation):
@@ -30,26 +40,39 @@ def is_viable(option: ModeOption, prefs: Preferences) -> bool:
             and 0 <= option.fare_yuan <= prefs.max_taxi_fare_yuan)
 
 
+def _subway_bonus_minutes(option: ModeOption, priority: str) -> float:
+    """Reward subway reliability in balanced and time preferences."""
+    if option.mode != "transit" or priority == "cost":
+        return 0.0
+    if option.boarding_kind == "subway":
+        return 5.0 if priority == "balanced" else 3.0
+    if any(step.kind == "subway" for step in option.transit_steps):
+        return 2.5 if priority == "balanced" else 1.5
+    return 0.0
+
+
 def option_score(option: ModeOption, priority: str) -> float:
     time_min = (option.total_duration_s if option.total_duration_s is not None else option.duration_s) / 60
-    # 费用未知时不能当作零：增加保守惩罚，并在界面显示“待估算”。
+    # 费用未知不能当作零：增加保守惩罚，并在界面显示“待估算”。
     fee_min = option.fare_yuan if option.fare_yuan is not None else 10000
     walking = (option.walking_m or 0) / 1000
     transfers = option.transfers or 0
+    bonus = _subway_bonus_minutes(option, priority)
     if priority == "time":
-        return time_min
+        return time_min - bonus
     if priority == "cost":
         return fee_min * 1000 + time_min + walking * 2 + transfers * 2
-    return time_min + fee_min * .55 + walking * 8 + transfers * 5
+    return time_min + fee_min * .55 + walking * 8 + transfers * 5 - bonus
 
 
 def preferred_option(options: list[ModeOption], priority: str) -> ModeOption:
     best = min(options, key=lambda option: option_score(option, priority))
     if best.mode != "transit":
         return best
-    # Preserve the chosen time/cost preference, then prefer a closer real entrance.
+    # Preserve boarding kind so a shorter curb walk cannot replace a subway entrance.
     duration = best.total_duration_s if best.total_duration_s is not None else best.duration_s
     comparable = [option for option in options if option.mode == "transit"
+                  and option.boarding_kind == best.boarding_kind
                   and option.boarding_walk_m is not None
                   and (option.total_duration_s if option.total_duration_s is not None else option.duration_s) <= duration + 120
                   and option.fare_yuan == best.fare_yuan
@@ -58,14 +81,16 @@ def preferred_option(options: list[ModeOption], priority: str) -> ModeOption:
     return min(comparable, key=lambda option: (option.boarding_walk_m, option_score(option, priority))) if comparable else best
 
 
-def taxi_score_seconds(driver_detour_s: int, option: ModeOption):
-    """One yuan costs three combined driver/passenger minutes; compare exact decimals."""
-    return (Decimal(driver_detour_s + option.total_duration_s)
-            + Decimal(str(option.fare_yuan)) * TAXI_SECONDS_PER_YUAN)
+def taxi_score_seconds(driver_detour_s: int, option: ModeOption, priority: str = "balanced"):
+    """Weighted combined driver detour, passenger trip time, and taxi fare in exact Decimal seconds."""
+    w_driver, w_pax, sec_per_yuan = TAXI_WEIGHTS.get(priority, TAXI_WEIGHTS["balanced"])
+    return (Decimal(driver_detour_s) * w_driver
+            + Decimal(option.total_duration_s) * w_pax
+            + Decimal(str(option.fare_yuan)) * sec_per_yuan)
 
 
 def rank_taxi_recommendations(recs: list[Recommendation], prefs: Preferences) -> list[Recommendation]:
-    """Rank feasible trips by driver delay + passenger full trip + fare at 3 min/yuan."""
+    """Rank feasible trips by priority-weighted driver delay + passenger full trip + taxi fare."""
     candidates = []
     for original in recs:
         if not 0 <= original.driver_detour_s <= prefs.max_detour_minutes * 60:
@@ -85,8 +110,9 @@ def rank_taxi_recommendations(recs: list[Recommendation], prefs: Preferences) ->
                 event("taxi_filtered", candidate_id=original.id, reason="fare_limit_or_unknown",
                       limit_yuan=prefs.max_taxi_fare_yuan)
             continue
-        option = min(options, key=lambda item: (taxi_score_seconds(original.driver_detour_s, item),
+        option = min(options, key=lambda item: (taxi_score_seconds(original.driver_detour_s, item, prefs.priority),
                                                 item.total_duration_s, item.fare_yuan))
+
         rec = original.model_copy(deep=True)
         rec.options = [option]
         rec.suggested_mode = "taxi"
@@ -110,22 +136,84 @@ def rank_taxi_recommendations(recs: list[Recommendation], prefs: Preferences) ->
         else:
             frontier.append(rec)
 
-    # Exact equality at one yuan / three minutes favors saving time.
     ordered = sorted(frontier, key=lambda rec: (
-        taxi_score_seconds(rec.driver_detour_s, rec.options[0]),
+        taxi_score_seconds(rec.driver_detour_s, rec.options[0], prefs.priority),
         rec.driver_detour_s + rec.options[0].total_duration_s,
         rec.options[0].fare_yuan, rec.driver_detour_s, rec.id))
-    selected = ordered[:MAX_RECOMMENDATIONS]
+
+    selected = []
+    for rec in ordered:
+        if any(0 < haversine_m(rec.point.point, ex.point.point) <= 350
+               and rec.options[0].fare_yuan == ex.options[0].fare_yuan
+               and abs(rec.driver_detour_s - ex.driver_detour_s) <= 60
+               and abs(rec.options[0].total_duration_s - ex.options[0].total_duration_s) <= 60
+               for ex in selected):
+            event("taxi_filtered", candidate_id=rec.id, reason="duplicate_nearby_cluster")
+            continue
+        selected.append(rec)
+        if len(selected) == MAX_RECOMMENDATIONS:
+            break
+
+    _, _, sec_per_yuan = TAXI_WEIGHTS.get(prefs.priority, TAXI_WEIGHTS["balanced"])
+    priority_label = {"balanced": "均衡", "time": "省时间", "cost": "省费用"}.get(prefs.priority, "均衡")
     for index, rec in enumerate(selected):
         option = rec.options[0]
-        rec.score = float(taxi_score_seconds(rec.driver_detour_s, option) / 60)
+        rec.score = float(taxi_score_seconds(rec.driver_detour_s, option, prefs.priority) / 60)
         rec.recommendation_label = "综合推荐" if index == 0 else f"综合备选{index + 1}"
         rec.reason = (f"{rec.recommendation_label}：司机增加约{rec.driver_detour_s / 60:.1f}分钟（含停靠），"
                       f"乘客全程约{option.total_duration_s / 60:.1f}分钟，打车预估{option.fare_yuan:.1f}元。"
-                      "按每1元折合双方合计3分钟比较，分数相同时优先省时；停靠条件待核实。")
+                      f"当前按{priority_label}偏好综合比较，分数相同时优先省时；停靠条件待核实。")
     event("taxi_shortlist", recommendations=[recommendation_summary(rec) for rec in selected],
-          remaining_frontier_ids=[rec.id for rec in ordered], seconds_per_yuan=TAXI_SECONDS_PER_YUAN)
+          remaining_frontier_ids=[rec.id for rec in ordered], seconds_per_yuan=int(sec_per_yuan))
     return selected
+
+
+def _enrich_dual_mode_recommendation(rec: Recommendation, prefs: Preferences, selected: list[Recommendation]):
+    taxis = [option for option in rec.options if option.mode == "taxi"]
+    transits = [option for option in rec.options if option.mode == "transit"]
+    if not taxis or not transits:
+        return
+    taxi = min(taxis, key=lambda option: taxi_score_seconds(rec.driver_detour_s, option, prefs.priority))
+    transit = preferred_option(transits, prefs.priority)
+    taxi_total, transit_total = taxi.total_duration_s, transit.total_duration_s
+    old_mode = rec.suggested_mode
+    if old_mode == "transit":
+        represented = any(other is not rec and other.suggested_mode == "transit" for other in selected)
+        if (represented or len(selected) == 1) and (
+            (transit.boarding_kind != "subway" and taxi.fare_yuan <= 18 and transit_total - taxi_total >= 900)
+            or (prefs.priority == "time" and taxi.fare_yuan <= 25 and transit_total - taxi_total >= 600)
+        ):
+            rec.suggested_mode = "taxi"
+    else:
+        represented = any(other is not rec and other.suggested_mode == "taxi" for other in selected)
+        if (represented or len(selected) == 1) and (
+            transit.boarding_kind == "subway"
+            and transit.boarding_walk_m is not None and transit.boarding_walk_m <= 200
+            and prefs.priority != "time" and transit_total <= taxi_total + 600
+            and transit.fare_yuan is not None and taxi.fare_yuan - transit.fare_yuan >= 15
+        ):
+            rec.suggested_mode = "transit"
+    # The card and detail panel read the first option of each mode.
+    rec.options = [transit, taxi] if rec.suggested_mode == "transit" else [taxi, transit]
+    if rec.suggested_mode != old_mode:
+        chosen = rec.options[0]
+        rec.recommendation_label = "综合推荐" if rec.suggested_mode == "taxi" else ""
+        rec.score = (float(taxi_score_seconds(rec.driver_detour_s, taxi, prefs.priority) / 60)
+                     if rec.suggested_mode == "taxi" else round(option_score(transit, prefs.priority)
+                     + rec.driver_detour_s / 60 * (0.35 if prefs.priority in ("time", "cost") else 1), 2))
+        label = "打车" if rec.suggested_mode == "taxi" else "公共交通"
+        prefix = f"{rec.recommendation_label}：" if rec.recommendation_label else ""
+        fare = f"预估{chosen.fare_yuan:.1f}元" if chosen.fare_yuan is not None else "票价待估"
+        rec.reason = (f"{prefix}司机增加约{rec.driver_detour_s / 60:.1f}分钟（含停靠），"
+                      f"后续建议{label}，{fare}，乘客全程约{chosen.total_duration_s / 60:.1f}分钟；停靠条件待核实。")
+    if "同点位亦可" not in rec.reason:
+        if rec.suggested_mode == "transit":
+            rec.reason += f" 【同点位亦可打车：预估{taxi.fare_yuan:.1f}元，乘客全程约{taxi_total / 60:.1f}分钟】"
+        else:
+            label = "地铁" if transit.boarding_kind == "subway" else "公交"
+            fare = f"{transit.fare_yuan:.1f}元" if transit.fare_yuan is not None else "票价待估"
+            rec.reason += (f" 【同点位亦可乘{label}：{fare}，到站步行{transit.boarding_walk_m}米，"
+                           f"乘客全程约{(transit_total + 59) // 60}分钟】")
 
 
 def rank_recommendations(recs: list[Recommendation], prefs: Preferences) -> list[Recommendation]:
@@ -148,7 +236,12 @@ def rank_recommendations(recs: list[Recommendation], prefs: Preferences) -> list
             key = execution_key(rec)
             if key in by_point:
                 existing = by_point[key]
-                existing.options.extend(o for o in rec.options if o.mode not in {x.mode for x in existing.options})
+                for mode in ("taxi", "transit"):
+                    options = [o for o in rec.options if o.mode == mode]
+                    if options and not any(o.mode == mode for o in existing.options):
+                        chosen = (min(options, key=lambda o: taxi_score_seconds(rec.driver_detour_s, o, prefs.priority))
+                                  if mode == "taxi" else preferred_option(options, prefs.priority))
+                        existing.options.append(chosen)
             elif len(selected) < MAX_RECOMMENDATIONS:
                 by_point[key] = rec
                 selected.append(rec)
@@ -158,14 +251,23 @@ def rank_recommendations(recs: list[Recommendation], prefs: Preferences) -> list
         for original in recs:
             if execution_key(original) != execution_key(rec):
                 continue
-            for option in original.options:
-                if is_viable(option, prefs) and option.mode not in {o.mode for o in rec.options}:
-                    option = option.model_copy(deep=True)
+            for mode in ("taxi", "transit"):
+                if any(o.mode == mode for o in rec.options):
+                    continue
+                options = []
+                for original_option in original.options:
+                    if original_option.mode != mode or not is_viable(original_option, prefs):
+                        continue
+                    option = original_option.model_copy(deep=True)
                     if option.total_duration_s is None:
                         option.total_duration_s = rec.shared_ride_s + rec.stop_duration_s + option.duration_s
-                    if option.mode == "taxi" and option.fare_yuan is not None and (not math.isfinite(option.fare_yuan) or option.fare_yuan < 0):
-                        option.fare_yuan = None
-                    rec.options.append(option)
+                    options.append(option)
+                if options:
+                    chosen = (min(options, key=lambda o: taxi_score_seconds(rec.driver_detour_s, o, prefs.priority))
+                              if mode == "taxi" else preferred_option(options, prefs.priority))
+                    rec.options.append(chosen)
+    for rec in selected:
+        _enrich_dual_mode_recommendation(rec, prefs, selected)
     return selected
 
 
@@ -198,18 +300,20 @@ def _rank_transit_recommendations(recs: list[Recommendation], prefs: Preferences
                 continue
         best = preferred_option(viable, prefs.priority)
         rec.suggested_mode = best.mode
-        rec.score = round(option_score(best, prefs.priority) + rec.driver_detour_s / 60 * (0 if prefs.priority in {"time", "cost"} else 1), 2)
+        rec.score = round(option_score(best, prefs.priority) + rec.driver_detour_s / 60 * (0.35 if prefs.priority in ("time", "cost") else 1), 2)
         rec.reason = (f"司机预计增加 {rec.driver_detour_s / 60:.1f} 分钟，乘客全程约 "
                       f"{(best.total_duration_s + 59) // 60} 分钟，"
                       f"后续建议{'打车' if best.mode == 'taxi' else '公共交通'}；"
                       "但停靠合法性尚未核实。")
         if best.mode == "transit":
-            rec.reason += f" 到实际站台或入口步行{best.boarding_walk_m}米，优先选择接近站点的位置。"
-    # Remove candidates that are worse in every measured dimension.
+            rec.reason += f" 到实际站点或入口步行{best.boarding_walk_m}米，优先选择接近站点的位置。"
+    # Surface buses cannot dominate subway options merely through shorter walks.
     def dimensions(rec):
         option = preferred_option(rec.options, prefs.priority)
-        return (option.total_duration_s, option.fare_yuan, option.walking_m,
-                option.transfers, rec.driver_detour_s, option.boarding_walk_m)
+        return (1 if option.boarding_kind == "bus" else 0, rec.driver_detour_s,
+                option.total_duration_s, option.fare_yuan if option.fare_yuan is not None else 1e9,
+                option.walking_m if option.walking_m is not None else 1e9,
+                option.transfers if option.transfers is not None else 1e9, option.boarding_walk_m)
     viable_recs = [r for r in recs if r.score < 1e9]
     dominated = set()
     for rec in viable_recs:
@@ -224,7 +328,13 @@ def _rank_transit_recommendations(recs: list[Recommendation], prefs: Preferences
                 dominated.add(rec.id)
                 event("transit_filtered", candidate_id=rec.id, reason="dominated", by_candidate_id=other.id)
                 break
-    ordered = sorted((r for r in viable_recs if r.id not in dominated), key=lambda r: (r.score, r.driver_detour_s))
+    if prefs.priority == "cost":
+        ordered = sorted((r for r in viable_recs if r.id not in dominated), key=lambda r: (
+            preferred_option(r.options, prefs.priority).fare_yuan
+            if preferred_option(r.options, prefs.priority).fare_yuan is not None else 1e9,
+            preferred_option(r.options, prefs.priority).total_duration_s, r.driver_detour_s))
+    else:
+        ordered = sorted((r for r in viable_recs if r.id not in dominated), key=lambda r: (r.score, r.driver_detour_s))
     # Within two score-minutes / two actual minutes at the same fare, prioritize
     # verified access distance. Taxi candidates keep their independent ordering.
     remaining, ordered = ordered, []
@@ -234,7 +344,8 @@ def _rank_transit_recommendations(recs: list[Recommendation], prefs: Preferences
         group = [first]
         if first_option.mode == "transit":
             group = [rec for rec in remaining if rec.suggested_mode == "transit"
-                     and (option := preferred_option(rec.options, prefs.priority)).fare_yuan == first_option.fare_yuan
+                     and (option := preferred_option(rec.options, prefs.priority)).boarding_kind == first_option.boarding_kind
+                     and option.fare_yuan == first_option.fare_yuan
                      and option.total_duration_s <= first_option.total_duration_s + 120
                      and rec.score <= first.score + 2
                      and (option.transfers or 0) <= (first_option.transfers or 0)]

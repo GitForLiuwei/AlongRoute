@@ -13,7 +13,7 @@ import httpx
 from .geometry import haversine_m, project_to_path, point_along_path
 from .models import (ModeOption, Place, PlaceSuggestion, Point, Preferences, Recommendation,
                      RecommendationRequest, RecommendationResponse, RoadSegment, Route, ComparisonOption, DrivingStep)
-from .optimizer import MAX_BOARDING_WALK_M, is_viable, rank_recommendations, option_score, preferred_option, taxi_score_seconds
+from .optimizer import MAX_BOARDING_WALK_M, TAXI_WEIGHTS, is_viable, rank_recommendations, option_score, preferred_option, taxi_score_seconds
 from .candidates import (Candidate, Station, build_candidates, search_centers, terminal_is_usable,
                          controlled_segment, restricted_road, dropoff_road_name, spread_items, interleave_groups)
 from .highway import ExitAnchor, highway_centers, original_exits, discovered_exit, exit_was_used
@@ -36,8 +36,8 @@ class MapServiceError(Exception):
 class RequestGate:
     """Space request starts instead of sending a concurrent burst to AMap."""
 
-    def __init__(self, interval=0.55):
-        self.interval = interval
+    def __init__(self, interval=None):
+        self.interval = float(os.getenv('AMAP_REQUEST_INTERVAL_S', '0.35')) if interval is None else interval
         self.lock = asyncio.Lock()
         self.next_start = 0.0
 
@@ -272,6 +272,8 @@ class AmapClient:
                 continue
             if haversine_m(origin.point, option.boarding_stop.point) > MAX_BOARDING_WALK_M:
                 continue
+            if option.original_access_m is None or option.original_access_s is None:
+                continue
             # Verify the entrance/platform actually used by THIS itinerary.
             try:
                 access = await self.walking(origin.point, option.boarding_stop.point)
@@ -282,10 +284,9 @@ class AmapClient:
                 continue
             option.boarding_walk_m = access.distance_m
             option.boarding_walk_route = access.polyline
-            if option.original_access_m is None or option.original_access_s is None:
-                continue  # Cannot reconcile a separately checked path without its original leg.
             delta_s = access.duration_s - option.original_access_s
-            if delta_s > 30:
+            max_delta_s = 120 if option.boarding_kind == "subway" else 30
+            if delta_s > max_delta_s:
                 # A materially slower replacement may miss the provider's service.
                 # Reject rather than reuse a now-unreachable timetable.
                 continue
@@ -597,7 +598,7 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                             _, progress, lateral = project_to_path(point, baseline.polyline)
                             found.append(Candidate(Place(name=f"{station.place.name}附近下客候选"[:120], point=point,
                                 citycode=station.place.citycode), "station_area", progress, offset,
-                                route.duration_s, modes=("transit",), discovery_group="destination"))
+                                route.duration_s, modes=tuple(request.preferences.modes), discovery_group="destination"))
                         return found
                     except MapServiceError:
                         return []
@@ -653,8 +654,13 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                                    discovery_group=c.discovery_group) for c in candidates])
         errors, results = [], []
         evaluated_count = 0
+        def _region_group(c):
+            if not c.region:
+                return None
+            return (c.route_index, 'surface' if str(c.region).startswith('surface:') else c.region)
+
         evaluated_regions = set()
-        required_regions = {(c.route_index, c.region) for c in candidates if c.region}
+        required_regions = {_region_group(c) for c in candidates[:24] if _region_group(c) is not None}
 
         async def onward_options(place, at, modes=None):
             modes = request.preferences.modes if modes is None else modes
@@ -681,7 +687,8 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
         async def evaluate(candidate):
             nonlocal evaluated_count
             evaluated_count += 1
-            evaluated_regions.add((candidate.route_index, candidate.region))
+            if (rg := _region_group(candidate)) is not None:
+                evaluated_regions.add(rg)
             place = candidate.place
             event("candidate_started", point=place.model_dump(mode="json"), **candidate_trace(candidate))
             def reject(reason, **fields):
@@ -817,7 +824,26 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                 raise errors[0]
             warnings.append("部分交通方案查询失败，本次推荐不完整，请稍后重试。")
         ranked = rank_recommendations(results, request.preferences)
+        b_comp_opts = {o.mode: o for comp in comparisons if comp.label == "随车到B后前往C" for o in comp.options}
+        if b_comp_opts and len(ranked) > 1:
+            def _worse_than_b(rec):
+                chosen = preferred_option([o for o in rec.options if o.mode == rec.suggested_mode], request.preferences.priority)
+                b_opt = b_comp_opts.get(rec.suggested_mode)
+                if (b_opt is None or chosen.total_duration_s is None or b_opt.total_duration_s is None
+                        or chosen.fare_yuan is None or b_opt.fare_yuan is None):
+                    return False
+                return (rec.driver_detour_s > 90
+                        and chosen.total_duration_s >= b_opt.total_duration_s
+                        and chosen.fare_yuan >= b_opt.fare_yuan)
+            ranked.sort(key=_worse_than_b)
+        taxi_index = 0
         for rec in ranked:
+            if rec.suggested_mode == "taxi":
+                old_label = rec.recommendation_label
+                taxi_index += 1
+                rec.recommendation_label = "综合推荐" if taxi_index == 1 else f"综合备选{taxi_index}"
+                if old_label:
+                    rec.reason = rec.reason.replace(old_label, rec.recommendation_label, 1)
             chosen = preferred_option([o for o in rec.options if o.mode == rec.suggested_mode], request.preferences.priority)
             alternatives = [(comparison.label, o) for comparison in comparisons for o in comparison.options]
             if rec.suggested_mode == "taxi":
@@ -825,7 +851,7 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                                 if o.mode == "taxi" and o.fare_yuan is not None and o.fare_yuan >= 0]
                 if alternatives and chosen.fare_yuan is not None:
                     label, alternative = min(alternatives, key=lambda pair: (
-                        taxi_score_seconds(0, pair[1]), pair[1].total_duration_s, pair[1].fare_yuan))
+                        taxi_score_seconds(0, pair[1], request.preferences.priority), pair[1].total_duration_s, pair[1].fare_yuan))
                     delta = chosen.fare_yuan - alternative.fare_yuan
                     time_delta = chosen.total_duration_s - alternative.total_duration_s
                     rec.comparison = (f"相较于{label}，乘客预计{'多花' if delta > 0 else '少花'}"
@@ -841,8 +867,9 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                     rec.comparison += " 按当前偏好，对照方案更优或相当，建议优先考虑。"
         if "taxi" in request.preferences.modes:
             warnings.append(f"乘客打车费用上限为{request.preferences.max_taxi_fare_yuan}元；超过上限或费用未知的打车选项不参与推荐。")
-            warnings.append("打车综合分＝司机增加分钟＋乘客全程分钟＋预估车费×3，越低越优；多花1元可减少双方合计至少3分钟时优先省时。双方时间均含相应停靠，乘客时间含共同乘车、接车缓冲及后续驾车。")
-            warnings.append("打车已取消原先多绕1分钟省3元的独立淘汰规则，统一执行时间与费用综合比较；推荐偏好仅影响公交方案。")
+            w_driver, w_pax, sec_per_yuan = TAXI_WEIGHTS[request.preferences.priority]
+            priority_label = {"balanced": "均衡", "time": "省时间", "cost": "省费用"}[request.preferences.priority]
+            warnings.append(f"打车按{priority_label}偏好计算综合分＝司机增加分钟×{w_driver}＋乘客全程分钟×{w_pax}＋预估车费×{sec_per_yuan / 60:.1f}，越低越优；分数相同时优先省时。双方时间均含相应停靠，乘客时间含共同乘车、接车缓冲及后续驾车。")
         if request.preferences.priority == "cost" and "transit" in request.preferences.modes:
             warnings.append("公共交通省费用仅比较不比当前最快公交候选多耗时15分钟以上的方案；未知费用不视为低价。")
         if not comparisons:

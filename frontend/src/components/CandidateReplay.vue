@@ -23,6 +23,7 @@ const translations: Record<string, string> = {
   evaluation_cancelled_or_budget_exhausted: '核验取消或预算耗尽', map_service_error: '地图服务查询失败',
   early_stop_or_planning_budget: '提前停止或精算预算耗尽', dominated: '存在时间、费用等条件均不差的替代方案',
   fare_limit_or_unknown: '打车费用超限或未知', mode_or_boarding_walking_transfer_limits: '交通方式、到站步行或换乘限制', cost_time_budget: '费用与时间预算',
+  duplicate_nearby_cluster: '与已保留候选距离、时间和车费相近',
 }
 function explain(code: string) { return translations[code] || code }
 function pointKey(p: Point) { return `${p.lon.toFixed(6)},${p.lat.toFixed(6)}` }
@@ -155,7 +156,7 @@ watch(stage, () => { selected.value = ''; query.value = '' })
         <p v-if="result?.mode === 'demo'" class="replay-warning">这是演示数据，没有真实的出口发现和路线核验过程。</p>
         <p v-else class="replay-warning">{{ result?.search_complete === false ? '本次搜索覆盖不完整。' : '' }}仅展示日志中已记录的点；没有进入候选池的位置不会出现在后续步骤中。{{ discovery ? '细线为探索路线的简化轨迹，浅紫圈为候选查询范围。' : '旧日志不含搜索轨迹，图上不连线。' }}</p>
         <nav class="replay-stages" aria-label="候选筛选步骤"><button v-for="(title, i) in stages" :key="title" :class="{ current: stage === i }" :aria-current="stage === i ? 'step' : undefined" @click="stage = i">{{ i + 1 }}. {{ title }}<small>{{ stats[i] }} {{ i === 0 ? '个搜索记录' : i === 3 ? '个核验通过记录' : i === 4 ? '个推荐方案' : '个候选' }}</small></button></nav>
-        <p>{{ [ '优先召回地铁、公交枢纽和停车场；出口及 Q 用于补充搜索。图中锚点不代表可以直接下客。', '候选主要来自枢纽附近实际可达的普通道路，并补充沿途道路和出口分流位置；不同出口约束保留为不同候选。', '结合批量粗排、枢纽类别和区域覆盖分配精算名额；粗估不作为硬淘汰依据，灰点不代表路线不可行。', '核验完整司机经停路线、驶出顺序、道路条件、绕路上限和后续交通。通过核验仍不等于确认可停车。', '核验通过后继续比较交通方式、时间和费用。打车综合分＝司机增加分钟＋乘客全程分钟＋车费×3，越低越优。' ][stage] }}</p>
+        <p>{{ [ '优先召回地铁、公交枢纽和停车场；出口及 Q 用于补充搜索。图中锚点不代表可以直接下客。', '候选主要来自枢纽附近实际可达的普通道路，并补充沿途道路和出口分流位置；不同出口约束保留为不同候选。', '结合批量粗排、枢纽类别和区域覆盖分配精算名额；粗估不作为硬淘汰依据，灰点不代表路线不可行。', '核验完整司机经停路线、驶出顺序、道路条件、绕路上限和后续交通。通过核验仍不等于确认可停车。', '核验通过后继续按本次偏好比较交通方式、时间和费用；优先保留优于随车到司机终点后换乘的方案。' ][stage] }}</p>
         <div class="replay-layout">
           <div>
             <svg class="replay-map" viewBox="0 0 800 410" role="img" aria-label="候选点空间分布示意图，非道路地图">
@@ -178,7 +179,7 @@ watch(stage, () => { selected.value = ''; query.value = '' })
             <p v-if="!dots.length">此步骤没有记录。旧版算法或演示模式可能未记录此阶段。</p>
           </div>
         </div>
-        <article v-if="active" class="replay-detail"><strong>{{ active.name }} · {{ labels[active.status] }}</strong><p v-for="(detail, i) in active.details" :key="i">{{ detail }}</p><template v-if="active.rec"><p>司机增加 {{ (active.rec.driver_detour_s / 60).toFixed(1) }} 分钟</p><p v-for="o in active.rec.options" :key="o.mode">{{ o.mode === 'taxi' ? '打车' : '公交' }} · 乘客全程 {{ ((o.total_duration_s ?? 0) / 60).toFixed(1) }} 分钟 · {{ o.fare_yuan == null ? '费用未知' : `${o.fare_yuan} 元` }}<span v-if="o.mode === 'taxi' && o.fare_yuan != null"> · 综合分 {{ (active.rec.driver_detour_s / 60 + (o.total_duration_s ?? 0) / 60 + o.fare_yuan * 3).toFixed(1) }}</span></p></template></article>
+        <article v-if="active" class="replay-detail"><strong>{{ active.name }} · {{ labels[active.status] }}</strong><p v-for="(detail, i) in active.details" :key="i">{{ detail }}</p><template v-if="active.rec"><p>司机增加 {{ (active.rec.driver_detour_s / 60).toFixed(1) }} 分钟</p><p v-for="o in active.rec.options" :key="o.mode">{{ o.mode === 'taxi' ? '打车' : '公交' }} · 乘客全程 {{ ((o.total_duration_s ?? 0) / 60).toFixed(1) }} 分钟 · {{ o.fare_yuan == null ? '费用未知' : `${o.fare_yuan} 元` }}</p></template></article>
         <details v-if="result?.warnings?.length"><summary>查看本次搜索限制</summary><p v-for="warning in result.warnings" :key="warning">{{ warning }}</p></details>
       </template>
     </div>

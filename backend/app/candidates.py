@@ -70,7 +70,7 @@ def search_centers(route: Route) -> list[Point]:
             continue
         length = sum(haversine_m(a, b) for a, b in zip(segment.polyline, segment.polyline[1:]))
         for point in [segment.polyline[0], *sample_path(segment.polyline, count=max(1, math.ceil(length / 1200)))]:
-            if not any(haversine_m(point, other) < 500 for other in centers):
+            if not any(haversine_m(point, other) < 800 for other in centers):
                 centers.append(point)
     return spread_items(centers, 60)
 
@@ -129,6 +129,18 @@ def build_candidates(route: Route, parking: list[Place], stations: list[Station]
         return []
     path_length = sum(haversine_m(a, b) for a, b in zip(path, path[1:]))
     raw: list[tuple[Place, str]] = [(place, "parking") for place in parking]
+
+    exit_landings: list[Point] = []
+    last_controlled = False
+    for segment in route.segments:
+        if not segment.polyline:
+            continue
+        if controlled_segment(segment):
+            last_controlled = True
+        elif last_controlled and not restricted_segment(segment) and segment.name:
+            exit_landings.append(segment.polyline[0])
+            last_controlled = False
+
     # Sample ordinary-road geometry, including the roads after an exit.
     if not route.is_schematic:
         ordinary = [segment for segment in route.segments
@@ -158,6 +170,7 @@ def build_candidates(route: Route, parking: list[Place], stations: list[Station]
     restricted = [(segment, (min(p.lon for p in segment.polyline), max(p.lon for p in segment.polyline),
                              min(p.lat for p in segment.polyline), max(p.lat for p in segment.polyline)))
                   for segment in route.segments if segment.polyline and restricted_segment(segment)]
+    ac_direct_m = haversine_m(request.origin.point, request.passenger_destination.point)
     candidates = []
     lateral_distances = {}
     for place, source in raw:
@@ -177,8 +190,13 @@ def build_candidates(route: Route, parking: list[Place], stations: list[Station]
                                 for station in stations), default=None)
         # Only a coarse pruning bound. Actual access is checked against the
         # station/entrance used by the returned transit itinerary on walking roads.
-        estimate = haversine_m(place.point, request.passenger_destination.point) / 10 + lateral / 5
+        pc_dist_m = haversine_m(place.point, request.passenger_destination.point)
+        estimate = pc_dist_m / 10 + lateral / 5
         estimate += route.duration_s * progress / max(path_length, 1)
+        if exit_landings and min(haversine_m(place.point, ex) for ex in exit_landings) <= 1200:
+            estimate = max(0.0, estimate - 180.0)
+        if path_length > 10000 and pc_dist_m > ac_direct_m * 0.95:
+            estimate += 900.0
         candidates.append(Candidate(place, source, progress, station_distance, estimate))
 
     # Reserve coverage along the route; do not cut every candidate solely by its

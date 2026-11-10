@@ -20,7 +20,7 @@ class Place(BaseModel):
 
 
 class Preferences(BaseModel):
-    max_detour_minutes: int = Field(default=5, ge=0, le=180)
+    max_detour_minutes: int = Field(default=180, ge=0, le=180)
     max_taxi_fare_yuan: int = Field(default=200, ge=0, le=200)
     modes: list[Literal["taxi", "transit"]] = Field(default=["taxi", "transit"])
     priority: Literal["balanced", "time", "cost"] = "balanced"

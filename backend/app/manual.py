@@ -56,7 +56,7 @@ async def calculate_manual(request: ManualDropoffRequest) -> ManualDropoffRespon
     if fare is not None and passenger_total is not None:
         option = ModeOption(mode="taxi", duration_s=wait_s + taxi.duration_s,
                             total_duration_s=passenger_total, fare_yuan=fare, details="指定下车点测算")
-        score = float(taxi_score_seconds(detour, option) / 60)
+        score = float(taxi_score_seconds(detour, option, request.preferences.priority) / 60)
     generated = datetime.now(timezone.utc)
     return ManualDropoffResponse(
         origin=request.origin, driver_destination=request.driver_destination,

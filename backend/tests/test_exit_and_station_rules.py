@@ -1,9 +1,11 @@
 import asyncio
 
 import httpx
+import pytest
 
 from app.amap import AmapClient
-from app.candidates import build_candidates, controlled_segment, search_centers
+from app.candidates import Candidate, Station, build_candidates, controlled_segment, search_centers
+from app.exit_discovery import FocusedDiscovery
 from app.highway import ExitAnchor, discovered_exit, exit_was_used, highway_centers, original_exits
 from app.models import ModeOption, Place, Point, Preferences, Recommendation, RecommendationRequest, RoadSegment, Route
 from app.optimizer import is_viable, preferred_option, rank_recommendations
@@ -41,6 +43,61 @@ def test_mixed_modes_keep_taxi_when_transit_access_fails():
     assert [item.mode for item in ranked[0].options] == ["taxi"]
 
 
+@pytest.mark.parametrize("modes", [["taxi", "transit"], ["transit"]])
+def test_station_approach_preserves_requested_modes(modes):
+    from types import SimpleNamespace
+    route = Route(duration_s=600, distance_m=6000, polyline=[A, B],
+                  segments=[RoadSegment(name="人民路", polyline=[A, B])])
+    request = RecommendationRequest(origin=Place(name="A", point=A),
+        driver_destination=Place(name="B", point=B), passenger_destination=Place(name="C", point=P),
+        preferences=Preferences(modes=modes))
+
+    async def driving(*args, **kwargs):
+        return route
+
+    discovery = FocusedDiscovery()
+    discovery.api = SimpleNamespace(driving=driving)
+    discovery.request, discovery.route_order, discovery.station_groups = request, {id(route): 0}, []
+    seed = Candidate(Place(name="seed", point=E), "roadside", 0, None, 0)
+    asyncio.run(discovery.station_approach(route, seed, Station(Place(name="地铁口", point=B), "subway")))
+    assert discovery.station_groups
+    assert all(candidate.modes == tuple(modes) for group in discovery.station_groups for candidate in group)
+
+
+def test_legacy_station_candidates_include_taxi_and_transit(monkeypatch):
+    from app.amap import calculate_live
+    req = RecommendationRequest(origin=Place(name="A", point=A, citycode="020"),
+        driver_destination=Place(name="B", point=B, citycode="020"),
+        passenger_destination=Place(name="C", point=P, citycode="020"))
+    seen = []
+
+    async def driving(self, origin, destination, via=None):
+        points = [origin, *([via] if via else []), destination]
+        return Route(duration_s=600, distance_m=6000, polyline=points,
+            segments=[RoadSegment(name="人民路", polyline=points)],
+            dropoff_duration_s=300 if via else None, fare_yuan=12)
+
+    async def nearby(self, center, keyword, radius=None):
+        return [Place(name="地铁站入口", point=B, citycode="020")] if keyword == "地铁站" else []
+
+    async def transit(*args, **kwargs):
+        return []
+
+    def event(name, **data):
+        if name == "candidates_ready":
+            seen.extend(c for c in data["candidates"] if c["source"] == "station_area")
+
+    monkeypatch.setenv("CANDIDATE_STRATEGY", "legacy")
+    monkeypatch.setattr(AmapClient, "driving", driving)
+    monkeypatch.setattr(AmapClient, "nearby", nearby)
+    monkeypatch.setattr(AmapClient, "transit", transit)
+    monkeypatch.setattr("app.amap.build_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr("app.amap.event", event)
+    asyncio.run(calculate_live(req))
+    assert seen
+    assert all(candidate["modes"] == ("taxi", "transit") for candidate in seen)
+
+
 def test_nearer_actual_stop_wins_when_time_and_fare_are_comparable():
     far, near = option(access=280), option(access=45, duration=1260)
     assert preferred_option([far, near], "time") is near
@@ -70,6 +127,36 @@ def test_highway_mainline_generates_no_dropoff_search_centers_or_points():
     request = RecommendationRequest(origin=Place(name="A", point=A), driver_destination=Place(name="B", point=B),
         passenger_destination=Place(name="C", point=P))
     assert build_candidates(route, [], [], request) == []
+
+
+def test_long_route_shortlist_advances_toward_passenger_destination():
+    destination = Point(lon=113.6, lat=A.lat)
+    end = Point(lon=113.5, lat=A.lat)
+    route = Route(duration_s=5000, distance_m=20000, polyline=[A, end],
+        segments=[RoadSegment(name='普通道路', polyline=[A, end])])
+    request = RecommendationRequest(origin=Place(name='A', point=A),
+        driver_destination=Place(name='B', point=end),
+        passenger_destination=Place(name='C', point=destination))
+    selected = build_candidates(route, [], [], request, limit=1)
+    assert len(selected) == 1
+    assert selected[0].place.point.lon > A.lon + .015
+
+
+def test_exit_landing_is_prioritized_without_sampling_highway():
+    before = Point(lon=113.45, lat=A.lat)
+    landing = Point(lon=113.452, lat=A.lat)
+    end = Point(lon=113.5, lat=A.lat)
+    route = Route(duration_s=600, distance_m=20000, polyline=[A, before, landing, end],
+        segments=[RoadSegment(name='G4高速', polyline=[A, before]),
+                  RoadSegment(name='出口匝道', polyline=[before, landing]),
+                  RoadSegment(name='人民路', polyline=[landing, end])])
+    request = RecommendationRequest(origin=Place(name='A', point=A),
+        driver_destination=Place(name='B', point=end),
+        passenger_destination=Place(name='C', point=end))
+    selected = build_candidates(route, [], [], request, limit=1)
+    assert len(selected) == 1
+    # Keep the chosen surface point near the landing, beyond the ramp endpoint.
+    assert landing.lon < selected[0].place.point.lon < landing.lon + .012
 
 
 def test_highway_to_highway_interchange_is_not_an_original_exit():

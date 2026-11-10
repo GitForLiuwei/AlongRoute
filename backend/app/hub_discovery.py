@@ -54,7 +54,9 @@ class HubDiscovery:
                 candidate.origins = ['baseline_surface' if index < len(routes) else 'passenger_surface']
                 candidate.modes = tuple(request.preferences.modes)
             surface.extend(group)
-        centers = recall_centers(exploration, request.passenger_destination.point)
+        max_corridor_m = max(8000.0, request.preferences.max_detour_minutes * 800.0)
+        centers = recall_centers(exploration, request.passenger_destination.point,
+                                 driver_routes=routes, max_corridor_m=max_corridor_m)
         event('discovery_map', strategy='hub_first', driver_routes=[overview(r) for r in routes],
               passenger_routes=[overview(r) for r in passenger_routes],
               search_centers=[p.model_dump() for p in centers], search_radius_m=5000)
@@ -71,7 +73,9 @@ class HubDiscovery:
         seeds = sorted(self.seeds.values(), key=lambda c: (c.region, c.hub_kind, c.place.point.csv()))
         for seed in seeds:
             seed.coarse = geometry_estimate(seed, routes, request.passenger_destination.point)
-        seeds = coverage_order(seeds, request.passenger_destination.point, request.preferences.modes)[:96]
+        max_detour_s = request.preferences.max_detour_minutes * 60
+        seeds = coverage_order(seeds, request.passenger_destination.point,
+                               request.preferences.modes, max_detour_s=max_detour_s)[:96]
         ordered = await estimate_candidates(api, request, routes, seeds)
         event('hub_shortlist', generated=len(self.seeds), selected=min(12, len(ordered)))
         try:
@@ -80,9 +84,14 @@ class HubDiscovery:
         except asyncio.TimeoutError:
             self.warnings.append('部分枢纽的下客道路尚未完成核验，保留已生成候选。')
         primary = sorted(self.approached, key=lambda c: (c.region, c.hub_kind, c.place.point.csv()))
-        # Sparse hub coverage gets a small exit supplement; skip duplicate A->C/POI station work.
-        needs_supplement = len(primary) < 8 or ('transit' in request.preferences.modes
-                            and not any(c.source == 'station_area' for c in primary))
+        # Count useful hub coverage before deciding whether exit exploration is needed.
+        for c in primary:
+            c.coarse = geometry_estimate(c, routes, request.passenger_destination.point)
+        soft_detour_bound_s = max(1200.0, max_detour_s * 3.0)
+        feasible_primary = [c for c in primary if (c.coarse.get('detour_s') or 0) <= soft_detour_bound_s]
+        needs_supplement = len(feasible_primary) < 8 or (
+            'transit' in request.preferences.modes and not any(c.source == 'station_area' for c in primary)
+        )
         if needs_supplement and any(controlled_segment(s) for r in routes for s in r.segments) and deadline - perf_counter() > 2:
             supplement = await FocusedDiscovery(candidate_limit=8, surface_reserve=0,
                 discovery_budget_s=min(8, deadline - perf_counter()), include_stations=False,
@@ -98,9 +107,10 @@ class HubDiscovery:
             c.coarse = geometry_estimate(c, routes, request.passenger_destination.point)
         try:
             ordered = await asyncio.wait_for(estimate_candidates(api, request, routes, [*primary, *surface]),
-                                            timeout=max(.01, min(4.2, deadline - perf_counter())))
+                                            timeout=max(.01, min(6.0, deadline - perf_counter())))
         except asyncio.TimeoutError:
-            ordered = coverage_order([*primary, *surface], request.passenger_destination.point, request.preferences.modes)
+            ordered = coverage_order([*primary, *surface], request.passenger_destination.point,
+                                     request.preferences.modes, max_detour_s=max_detour_s)
         primary_ids = {id(c) for c in primary}
         self.candidates, _ = select_candidates([c for c in ordered if id(c) in primary_ids],
             [c for c in ordered if id(c) not in primary_ids], limit=48, surface_reserve=12)
@@ -129,7 +139,17 @@ class HubDiscovery:
             # Harvest cached seeds even if provider work is cancelled.
             unique = {p.point.csv(): p for p in places
                       if haversine_m(center, p.point) <= 5000 and not restricted_road(p.name)}
-            places = sorted(unique.values(), key=lambda p: (haversine_m(center, p.point), p.point.csv()))[:25]
+            driver_routes = getattr(self, 'routes', None) or []
+
+            def seed_priority(p):
+                entrance_rank = 0 if (kind == 'subway' and '口' in p.name) else 1
+                if driver_routes:
+                    corridor_gap = min((project_to_path(p.point, r.polyline)[2] for r in driver_routes if r.polyline),
+                                       default=haversine_m(center, p.point))
+                    return (entrance_rank, round(corridor_gap, -2), haversine_m(center, p.point), p.point.csv())
+                return (haversine_m(center, p.point), p.point.csv())
+
+            places = sorted(unique.values(), key=seed_priority)[:25]
             for place in places:
                 key = (kind, place.point.csv())
                 candidate = Candidate(place, 'parking' if kind == 'parking' else 'station_area', 0, None, 0,
@@ -174,13 +194,25 @@ class HubDiscovery:
         self.approached.extend(found)
 
 
-def recall_centers(routes, destination, limit=6):
-    groups = [[destination]]
+def recall_centers(routes, destination, limit=6, driver_routes=None, max_corridor_m=None):
+    driver_list = driver_routes or []
+
+    def within_corridor(pt):
+        if not driver_list or max_corridor_m is None:
+            return True
+        return min((project_to_path(pt, r.polyline)[2] for r in driver_list if r.polyline), default=0.0) <= max_corridor_m
+
+    dest_near = within_corridor(destination)
+    groups = [[destination]] if dest_near else []
     for route in routes:
         q, _, _ = project_to_path(destination, route.polyline)
         exits = [a.place.point for a in original_exits(route)]
         samples = sample_path(route.polyline, 8)
-        groups.append([q, *sorted(exits + samples, key=lambda p: haversine_m(p, destination))])
+        ordered_pts = [q, *sorted(exits + samples, key=lambda p: haversine_m(p, destination))]
+        filtered_pts = [p for p in ordered_pts if within_corridor(p)] or [q]
+        groups.append(filtered_pts)
+    if not dest_near:
+        groups.append([destination])
     centers = []
     for point in interleave_groups(groups):
         if all(haversine_m(point, old) >= 2000 for old in centers):

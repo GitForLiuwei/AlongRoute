@@ -30,7 +30,7 @@ const routes = computed(() => [
     </ol>
     <div class="driver-comparison">
       <div><span>原路线</span><strong>{{ distance(baseline.distance_m) }}</strong><span>驾车 {{ duration(baseline.duration_s) }}</span></div>
-      <div><span>经下车点</span><strong>{{ distance(recommendation.driver_route.distance_m) }}</strong><span>总耗时 {{ duration(recommendation.driver_route.duration_s + recommendation.stop_duration_s) }}（含停靠）</span></div>
+      <div><span>经下车点</span><strong>{{ distance(recommendation.driver_route.distance_m) }}</strong><span>司机总时间 {{ duration(recommendation.driver_route.duration_s + recommendation.stop_duration_s) }}（含停靠）</span></div>
       <div><span>变化</span><strong>{{ distanceDelta < 0 ? '减少' : '增加' }} {{ distance(Math.abs(distanceDelta)) }}</strong><span>司机增加约 {{ detourDuration(recommendation.driver_detour_s) }}（含停靠）</span></div>
     </div>
     <p class="driver-timing">到下车点驾车 {{ duration(recommendation.shared_ride_s) }} → 停靠 {{ duration(recommendation.stop_duration_s) }} → 继续驾车 {{ duration(remaining) }} 到司机终点</p>
