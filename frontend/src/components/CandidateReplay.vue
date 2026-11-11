@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { apiGet, type Point, type Place } from '../lib/api'
+import { downloadDiagnostic } from '../lib/diagnostics'
 
 const props = defineProps<{ searchId?: string | null }>()
 // Diagnostic payloads vary by algorithm version; preserve unknown reason codes explicitly.
@@ -45,6 +46,9 @@ watch(() => props.searchId, id => {
 }, { immediate: true })
 function toggle() { opened.value = !opened.value; if (opened.value && identifier.value && !data.value) void load() }
 const events = computed(() => data.value?.events || [])
+const rawOpen = ref(false), eventQuery = ref('')
+const filteredEvents = computed(() => rawOpen.value ? events.value.filter(event =>
+  !eventQuery.value.trim() || JSON.stringify(event).toLowerCase().includes(eventQuery.value.trim().toLowerCase())) : [])
 const input = computed(() => events.value.find(e => e.event === 'route_input')?.request)
 const result = computed(() => events.value.find(e => e.event === 'route_result'))
 const discovery = computed(() => events.value.find(e => e.event === 'discovery_map'))
@@ -180,6 +184,14 @@ watch(stage, () => { selected.value = ''; query.value = '' })
           </div>
         </div>
         <article v-if="active" class="replay-detail"><strong>{{ active.name }} · {{ labels[active.status] }}</strong><p v-for="(detail, i) in active.details" :key="i">{{ detail }}</p><template v-if="active.rec"><p>司机增加 {{ (active.rec.driver_detour_s / 60).toFixed(1) }} 分钟</p><p v-for="o in active.rec.options" :key="o.mode">{{ o.mode === 'taxi' ? '打车' : '公交' }} · 乘客全程 {{ ((o.total_duration_s ?? 0) / 60).toFixed(1) }} 分钟 · {{ o.fare_yuan == null ? '费用未知' : `${o.fare_yuan} 元` }}</p></template></article>
+        <details class="raw-events" @toggle="rawOpen = ($event.target as HTMLDetailsElement).open">
+          <summary>原始事件日志 · {{ events.length }} 条</summary>
+          <template v-if="rawOpen">
+            <div class="replay-form"><input v-model="eventQuery" aria-label="筛选原始事件" placeholder="筛选事件类型、候选编号、错误或任意字段" /><button @click="downloadDiagnostic(`replay-${data.search_id}.json`, data)">导出完整日志</button></div>
+            <p>匹配 {{ filteredEvents.length }} 条，最多显示前 200 条；导出包含完整回放数据。</p>
+            <details v-for="(event, index) in filteredEvents.slice(0, 200)" :key="`${event.sequence}:${index}`"><summary>#{{ event.sequence }} · {{ event.event }} · {{ event.elapsed_ms ?? '—' }} ms</summary><pre>{{ JSON.stringify(event, null, 2) }}</pre></details>
+          </template>
+        </details>
         <details v-if="result?.warnings?.length"><summary>查看本次搜索限制</summary><p v-for="warning in result.warnings" :key="warning">{{ warning }}</p></details>
       </template>
     </div>
@@ -187,6 +199,7 @@ watch(stage, () => { selected.value = ''; query.value = '' })
 </template>
 
 <style scoped>
+.raw-events { margin: 18px 0; }.raw-events summary { cursor: pointer; padding: 6px 0; overflow-wrap: anywhere; }.raw-events pre { max-height: 360px; overflow: auto; background: #102037; color: #dcecff; padding: 12px; border-radius: 8px; font-size: 11px; }
 .replay-panel { margin: 16px 0; border: 1px solid #d9e3ee; border-radius: 14px; background: white; }
 .replay-toggle { width: 100%; padding: 18px; text-align: left; font-weight: 700; color: #245cb7; background: transparent; border: 0; cursor: pointer; }
 .replay-body { padding: 0 18px 18px; font-size: 13px; color: #475569; line-height: 1.7; }

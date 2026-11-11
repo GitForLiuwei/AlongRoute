@@ -33,6 +33,7 @@ class Candidate:
     origins: list[str] = field(default_factory=list)
     hub_kind: str = ""
     coarse: dict = field(default_factory=dict)
+    approach_duration_s: float | None = None
 
 
 def ordinary_highway(name: str) -> bool:
@@ -82,7 +83,6 @@ def controlled_segment(segment) -> bool:
         return False
     if any(word in segment.name for word in ("高速", "快速", "高架")):
         return True
-    # A surface road's instruction may merely announce the next elevated road.
     return (any(word in segment.instruction for word in ("高速", "快速", "高架"))
             and (not segment.name or any(word in segment.name for word in ("立交", "匝道"))))
 
@@ -141,7 +141,6 @@ def build_candidates(route: Route, parking: list[Place], stations: list[Station]
             exit_landings.append(segment.polyline[0])
             last_controlled = False
 
-    # Sample ordinary-road geometry, including the roads after an exit.
     if not route.is_schematic:
         ordinary = [segment for segment in route.segments
                     if len(segment.polyline) >= 2 and not restricted_segment(segment)]
@@ -150,7 +149,7 @@ def build_candidates(route: Route, parking: list[Place], stations: list[Station]
             for segment in ordinary:
                 length = sum(haversine_m(a, b) for a, b in zip(segment.polyline, segment.polyline[1:]))
                 seeds.extend([segment.polyline[0], *sample_path(segment.polyline,
-                    count=min(6, max(1, math.ceil(length / 200)))), segment.polyline[-1]])
+                              count=min(6, max(1, math.ceil(length / 200)))), segment.polyline[-1]])
             seeds = spread_items(list({point.csv(): point for point in seeds}.values()), 120)
         else:
             seeds = [path[0], *sample_path(path, count=min(100, max(12, math.ceil(path_length / 200)))), path[-1]]
@@ -161,22 +160,24 @@ def build_candidates(route: Route, parking: list[Place], stations: list[Station]
             _, progress, distance = project_to_path(station.place.point, path)
             if distance > 1000:
                 continue
-            # A bus platform is an anchor, never the car's stopping coordinate.
             for offset in (-100, -50, 50, 100):
                 point = point_along_path(path, progress + offset)
                 raw.append((Place(name=f"{station.place.name}附近道路"[:120], point=point,
                                   citycode=station.place.citycode or request.origin.citycode), "station_area"))
 
     restricted = [(segment, (min(p.lon for p in segment.polyline), max(p.lon for p in segment.polyline),
-                             min(p.lat for p in segment.polyline), max(p.lat for p in segment.polyline)))
+                            min(p.lat for p in segment.polyline), max(p.lat for p in segment.polyline)))
                   for segment in route.segments if segment.polyline and restricted_segment(segment)]
+
     ac_direct_m = haversine_m(request.origin.point, request.passenger_destination.point)
+    _, q_progress, q_gap = project_to_path(request.passenger_destination.point, path)
+    effective_span = min(path_length, max(path_length * 0.35, q_progress + max(8000.0, q_gap * 0.5)))
+
     candidates = []
     lateral_distances = {}
     for place, source in raw:
         if restricted_road(place.name):
             continue
-        # Cheap bounds avoid projecting every POI onto every remote highway segment.
         lon_margin = 5 / max(1000, 111000 * math.cos(math.radians(place.point.lat)))
         lat_margin = 5 / 110000
         if any(bounds[0] - lon_margin <= place.point.lon <= bounds[1] + lon_margin
@@ -188,8 +189,6 @@ def build_candidates(route: Route, parking: list[Place], stations: list[Station]
         lateral_distances[place.point.csv()] = lateral
         station_distance = min((haversine_m(place.point, station.place.point)
                                 for station in stations), default=None)
-        # Only a coarse pruning bound. Actual access is checked against the
-        # station/entrance used by the returned transit itinerary on walking roads.
         pc_dist_m = haversine_m(place.point, request.passenger_destination.point)
         estimate = pc_dist_m / 10 + lateral / 5
         estimate += route.duration_s * progress / max(path_length, 1)
@@ -197,10 +196,11 @@ def build_candidates(route: Route, parking: list[Place], stations: list[Station]
             estimate = max(0.0, estimate - 180.0)
         if path_length > 10000 and pc_dist_m > ac_direct_m * 0.95:
             estimate += 900.0
+        # Penalize overshoot points that go far past the closest approach Q toward B while receding from C
+        if path_length > 15000 and progress > effective_span and pc_dist_m > q_gap * 1.25:
+            estimate += (progress - effective_span) / 4.0 + 1200.0
         candidates.append(Candidate(place, source, progress, station_distance, estimate))
 
-    # Reserve coverage along the route; do not cut every candidate solely by its
-    # distance to the driver's route. Include station access in the coarse score.
     def score(candidate):
         station_penalty = 0
         if "transit" in request.preferences.modes:
@@ -212,27 +212,26 @@ def build_candidates(route: Route, parking: list[Place], stations: list[Station]
     selected: list[Candidate] = []
     buckets = {index: 0 for index in range(6)}
 
+    def bucket_of(c):
+        return min(5, int(c.progress_m / max(effective_span, 1) * 6))
+
     def add(candidate):
-        # Proximity alone cannot establish equivalence across road sides/levels.
         if any(candidate.place.point.csv() == item.place.point.csv() for item in selected):
             return False
         selected.append(candidate)
-        bucket = min(5, int(candidate.progress_m / max(path_length, 1) * 6))
+        bucket = bucket_of(candidate)
         buckets[bucket] += 1
         return True
 
-    # Round-robin across route sections before filling by heuristic score.
     for _ in range(max(1, limit // 6)):
         for bucket in range(6):
-            # Taxi discovery reserves near-route points first, then explores
-            # points nearer B. Lateral distance is only a discovery heuristic;
-            # the complete waypoint route later enforces the actual detour.
             bucket_order = ordered
             if request.preferences.modes == ["taxi"] and _ % 2 == 0:
                 bucket_order = near_route_order
             for candidate in bucket_order:
-                candidate_bucket = min(5, int(candidate.progress_m / max(path_length, 1) * 6))
-                if candidate_bucket == bucket and buckets[bucket] <= _ and add(candidate):
+                if candidate.progress_m > effective_span * 1.05 and len(ordered) > limit:
+                    continue
+                if bucket_of(candidate) == bucket and buckets[bucket] <= _ and add(candidate):
                     break
             if len(selected) >= limit:
                 return selected

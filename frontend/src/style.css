@@ -16,3 +16,20 @@
 .detail-modes:has(> :only-child) { grid-template-columns: 1fr; }
 .card-driver-total { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px; margin: 15px 0 0; color: #627587; font-size: 11px; }
 .card-driver-total strong { color: #2865a8; font-size: 14px; }
+
+.current-location { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #dce7e8; background: #f0fdfa; color: #0f766e; border-radius: 8px; padding: 8px 10px; font-size: 12px; }
+.card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.card-actions a, .card-actions button { border: 1px solid #c5dfd9; border-radius: 6px; padding: 6px 8px; background: #f0fdfa; color: #0f766e; text-decoration: none; font-size: 11px; line-height: 1.4; }
+.recommendation-card { cursor: pointer; }
+.recommendation-card:focus-visible { outline: 2px solid #0f766e; outline-offset: 3px; }
+.planning-progress { justify-content: space-between; background: #eef9f5; color: #136c5b; }
+.planning-progress > div { flex: 1; }
+.planning-progress button { flex-shrink: 0; }
+.planning-track { height: 5px; background: #d8eae5; border-radius: 5px; overflow: hidden; margin-top: 8px; }
+.planning-track > div { height: 100%; background: #14b8a6; transition: width .4s ease; }
+
+/* Separate user and developer entry points share the same trip state. */
+.page-nav{display:flex;gap:4px;padding:4px;background:#f0f4f6;border-radius:10px;flex-shrink:0}.page-nav a{padding:9px 16px;border-radius:7px;font-size:13px;color:#667781;font-weight:600}.page-nav a.active{background:white;color:#147e6e;box-shadow:0 2px 5px #1e3a4020}.advanced-toggle{display:block;width:100%;padding:12px 0;border:0;border-bottom:1px solid #e4ebef;background:transparent;text-align:left;color:#4c766d;font-size:12px;margin-top:12px}.route-toggle{padding:14px;margin:14px 0 0;background:#fff;border:1px solid #dce7e8;border-radius:10px}.debug-page .brand-mark{background:#245ba0}.debug-page .page-nav a.active{color:#245ba0}.debug-page .sidebar h1{font-size:29px}.debug-page .sidebar h1 span{color:#245ba0}.debug-page .content{min-width:0}.user-page .sidebar h1{font-size:31px}.user-page .sidebar{padding-top:24px}.user-page .security-hint{margin-top:14px}.user-page .result-grid .card-title{font-size:14px}.user-page .result-grid .card-stats strong{font-size:15px}.detail-panel>summary{cursor:pointer;font-size:14px;font-weight:700}.page-nav a:focus-visible,.advanced-toggle:focus-visible{outline:2px solid #147e6e;outline-offset:3px}.content{min-width:0}.user-page .header-menu,.debug-page .header-menu{display:none}
+@media(max-width:850px){.topbar{gap:12px;flex-wrap:wrap;height:auto;min-height:76px;padding:12px 18px}.page-nav{order:3;width:100%;justify-content:center}.page-nav a{flex:1;text-align:center}.user-page .sidebar h1{font-size:26px}.user-page .sidebar h1 br{display:none}.user-page .map-shell{height:300px}.user-page .result-grid{grid-template-columns:1fr}.user-page .footer{justify-content:center}.debug-page .sidebar h1{font-size:26px}}
+
+.onward-details{margin-top:14px}.onward-details>summary{font-size:12px;color:#287764;cursor:pointer;padding:10px 0}

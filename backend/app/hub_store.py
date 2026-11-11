@@ -9,7 +9,7 @@ from .models import Place, Point
 
 
 class HubStore:
-    def __init__(self, path=None, ttl=86400):
+    def __init__(self, path=None, ttl=30 * 24 * 3600):
         self.path = Path(path) if path else Path(__file__).resolve().parents[2] / '.runtime' / 'hub-pool.sqlite3'
         self.ttl = ttl
 

@@ -13,7 +13,7 @@ import httpx
 from .geometry import haversine_m, project_to_path, point_along_path
 from .models import (ModeOption, Place, PlaceSuggestion, Point, Preferences, Recommendation,
                      RecommendationRequest, RecommendationResponse, RoadSegment, Route, ComparisonOption, DrivingStep)
-from .optimizer import MAX_BOARDING_WALK_M, TAXI_WEIGHTS, is_viable, rank_recommendations, option_score, preferred_option, taxi_score_seconds
+from .optimizer import _assign_recommendation_labels, MAX_BOARDING_WALK_M, TAXI_WEIGHTS, is_viable, rank_recommendations, option_score, preferred_option, taxi_score_seconds
 from .candidates import (Candidate, Station, build_candidates, search_centers, terminal_is_usable,
                          controlled_segment, restricted_road, dropoff_road_name, spread_items, interleave_groups)
 from .highway import ExitAnchor, highway_centers, original_exits, discovered_exit, exit_was_used
@@ -654,17 +654,37 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                                    discovery_group=c.discovery_group) for c in candidates])
         errors, results = [], []
         evaluated_count = 0
+        pruned_count = 0
         def _region_group(c):
             if not c.region:
                 return None
-            return (c.route_index, 'surface' if str(c.region).startswith('surface:') else c.region)
+            reg = str(c.region)
+            if reg.startswith('surface:'):
+                return (c.route_index, 'surface')
+            if reg.startswith('hub:'):
+                reg = ':'.join(reg.split(':')[:2])
+            return (c.route_index, reg)
 
         evaluated_regions = set()
-        required_regions = {_region_group(c) for c in candidates[:24] if _region_group(c) is not None}
+        required_regions = {_region_group(c) for c in candidates if _region_group(c) is not None}
 
-        async def onward_options(place, at, modes=None):
-            modes = request.preferences.modes if modes is None else modes
+        async def onward_options(place, at, modes=None, allow_walk=False):
+            modes = [m for m in request.preferences.modes if modes is None or m in modes]
+            if not modes:
+                return []
             options = []
+            # A direct walk needs a real route: straight-line proximity cannot prove access.
+            if allow_walk and haversine_m(place.point, request.passenger_destination.point) <= 800:
+                try:
+                    walk = await api.walking(place.point, request.passenger_destination.point)
+                except MapServiceError:
+                    walk = None
+                if walk is not None and walk.distance_m <= min(1200, request.preferences.max_walking_m):
+                    return [ModeOption(mode=m, direct_walk=True, duration_s=walk.duration_s,
+                        fare_yuan=0.0, walking_m=walk.distance_m, transfers=0,
+                        boarding_walk_m=0, route=walk.polyline,
+                        details=f"下车后直接步行回家，约{walk.distance_m}米（约{max(1, round(walk.duration_s / 60))}分钟，¥0），无需打车或换乘公交。",
+                        notes=walk.walk_instructions) for m in modes[:1]]
             if "taxi" in modes:
                 try:
                     taxi = await api.driving(place.point, request.passenger_destination.point)
@@ -685,7 +705,7 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                     if option.mode != "taxi" or is_viable(option, request.preferences)]
 
         async def evaluate(candidate):
-            nonlocal evaluated_count
+            nonlocal evaluated_count, pruned_count
             evaluated_count += 1
             if (rg := _region_group(candidate)) is not None:
                 evaluated_regions.add(rg)
@@ -726,11 +746,24 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                 if extra > request.preferences.max_detour_minutes * 60:
                     reject("detour_limit", driver_detour_s=extra, limit_s=request.preferences.max_detour_minutes * 60)
                     return
+                # Bound quota use only after six ranked alternatives are available.
+                shortlist = rank_recommendations(results, request.preferences) if len(results) >= 6 else []
+                if len(shortlist) >= 6 and extra > max(r.driver_detour_s for r in shortlist) + 1500:
+                    pruned_count += 1
+                    reject("detour_bound_pruned", driver_detour_s=extra)
+                    return
                 shared = driver.dropoff_duration_s
-                options = await onward_options(place, departure + timedelta(seconds=shared + stop_s), request.preferences.modes)
+                options = await onward_options(place, departure + timedelta(seconds=shared + stop_s),
+                                               candidate.modes or request.preferences.modes, allow_walk=True)
                 for option in options:
                     option.total_duration_s = shared + stop_s + option.duration_s
                     option.arrival_at = departure + timedelta(seconds=option.total_duration_s)
+                    arrival_p = (departure + timedelta(seconds=shared + stop_s)).astimezone(LOCAL_TZ)
+                    minute = arrival_p.hour * 60 + arrival_p.minute
+                    if (option.mode == "transit" and not option.direct_walk
+                            and (minute >= 22 * 60 + 15 or minute < 5 * 60 + 50)):
+                        option.details = (f"⚠️ 预计夜间（{arrival_p:%H:%M}）抵达下车点，请留意地铁/公交末班车时间。"
+                                          + option.details)
                 if not options:
                     reject("no_viable_onward_options")
                     return
@@ -772,7 +805,8 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
             for offset in range(0, len(candidates), 8):
                 await asyncio.gather(*(evaluate(c) for c in candidates[offset:offset + 8]))
                 covered_modes = {option.mode for result in results for option in result.options}
-                if (hub_first and offset + 8 >= 24 and len(results) >= 6
+                if (hub_first and offset + 8 >= 24
+                        and len(rank_recommendations(results, request.preferences)) >= 6
                         and set(request.preferences.modes) <= covered_modes
                         and required_regions <= evaluated_regions):
                     # A bounded shortlist is not an optimality claim; report remaining work below.
@@ -788,7 +822,7 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
             if "transit" in pools and not focused_exits and not hub_first:
                 stops = {}
                 for rec in sorted(results, key=lambda rec: min(option_score(o, request.preferences.priority) for o in rec.options)):
-                    transit_options = [o for o in rec.options if o.mode == "transit"]
+                    transit_options = [o for o in rec.options if o.mode == "transit" and not o.direct_walk]
                     if transit_options:
                         option = preferred_option(transit_options, request.preferences.priority)
                         stops.setdefault(option.boarding_stop.point.csv(), Station(option.boarding_stop, option.boarding_kind))
@@ -818,11 +852,24 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
             event("planning_budget_reached", budget_s=round(planning_budget_s, 1), evaluated_candidates=evaluated_count,
                   completed_candidates=len(results))
             warnings.append(f"计算达到本阶段{planning_budget_s:.0f}秒预算，仅返回已完整验证的部分方案；对照方案可能未完成。")
+        if pruned_count:
+            complete = False
+            warnings.append(f"已对{pruned_count}个大绕行候选提前停止接驳查询，结果不代表全局最优。")
         if errors:
             complete = False
             if not results and not comparisons:
                 raise errors[0]
             warnings.append("部分交通方案查询失败，本次推荐不完整，请稍后重试。")
+        filtered_results = []
+        for rec in results:
+            dist_c = haversine_m(rec.point.point, request.passenger_destination.point)
+            if (dist_c <= 800 and rec.driver_detour_s > 900
+                    and any(other is not rec and other.driver_detour_s <= rec.driver_detour_s - 180
+                            for other in results)):
+                event("candidate_rejected", candidate_id=rec.id, reason="deep_detour_at_destination_doorstep")
+                continue
+            filtered_results.append(rec)
+        results = filtered_results
         ranked = rank_recommendations(results, request.preferences)
         b_comp_opts = {o.mode: o for comp in comparisons if comp.label == "随车到B后前往C" for o in comp.options}
         if b_comp_opts and len(ranked) > 1:
@@ -832,18 +879,12 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                 if (b_opt is None or chosen.total_duration_s is None or b_opt.total_duration_s is None
                         or chosen.fare_yuan is None or b_opt.fare_yuan is None):
                     return False
-                return (rec.driver_detour_s > 90
+                return (rec.driver_detour_s >= 90
                         and chosen.total_duration_s >= b_opt.total_duration_s
                         and chosen.fare_yuan >= b_opt.fare_yuan)
             ranked.sort(key=_worse_than_b)
-        taxi_index = 0
+        _assign_recommendation_labels(ranked, request.preferences)
         for rec in ranked:
-            if rec.suggested_mode == "taxi":
-                old_label = rec.recommendation_label
-                taxi_index += 1
-                rec.recommendation_label = "综合推荐" if taxi_index == 1 else f"综合备选{taxi_index}"
-                if old_label:
-                    rec.reason = rec.reason.replace(old_label, rec.recommendation_label, 1)
             chosen = preferred_option([o for o in rec.options if o.mode == rec.suggested_mode], request.preferences.priority)
             alternatives = [(comparison.label, o) for comparison in comparisons for o in comparison.options]
             if rec.suggested_mode == "taxi":
@@ -869,7 +910,7 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
             warnings.append(f"乘客打车费用上限为{request.preferences.max_taxi_fare_yuan}元；超过上限或费用未知的打车选项不参与推荐。")
             w_driver, w_pax, sec_per_yuan = TAXI_WEIGHTS[request.preferences.priority]
             priority_label = {"balanced": "均衡", "time": "省时间", "cost": "省费用"}[request.preferences.priority]
-            warnings.append(f"打车按{priority_label}偏好计算综合分＝司机增加分钟×{w_driver}＋乘客全程分钟×{w_pax}＋预估车费×{sec_per_yuan / 60:.1f}，越低越优；分数相同时优先省时。双方时间均含相应停靠，乘客时间含共同乘车、接车缓冲及后续驾车。")
+            warnings.append(f"打车按{priority_label}偏好计算综合分＝司机增加分钟×{w_driver}＋乘客全程分钟×{w_pax}＋预估车费×{sec_per_yuan / 60:.1f}，司机增加超过18分钟的部分追加75%绕行惩罚，越低越优；分数相同时优先省时。双方时间均含相应停靠，乘客时间含共同乘车及后续行程；直接步行无需接车缓冲。")
         if request.preferences.priority == "cost" and "transit" in request.preferences.modes:
             warnings.append("公共交通省费用仅比较不比当前最快公交候选多耗时15分钟以上的方案；未知费用不视为低价。")
         if not comparisons:

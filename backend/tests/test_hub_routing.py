@@ -7,7 +7,7 @@ from app.amap import AmapClient, MapServiceError, calculate_live
 from app.candidates import Candidate
 from app.coarse_routing import coverage_order, estimate_candidates
 from app.coordinates import gcj02_to_wgs84, wgs84_to_gcj02
-from app.geometry import haversine_m
+from app.geometry import haversine_m, project_to_path
 from app.hub_discovery import HubDiscovery, recall_centers
 from app.hub_store import HubStore
 from app.map_cache import MapResponseCache, TTL_SECONDS
@@ -174,11 +174,25 @@ def test_detour_tiers_include_stopping_time_and_preserve_overflow():
     assert coverage_order(candidates, C, ['taxi', 'transit'])[0] is candidates[0]
 
 
+@pytest.mark.parametrize('region_layout,stop_at', [('single_surface', 24), ('second_surface', 32), ('late_hub', 48), ('outer_hub', 24)])
 @pytest.mark.parametrize('accepted', [5, 6])
-def test_hub_early_stop_uses_shortlist_regions_and_requires_enough_results(monkeypatch, accepted):
-    candidates = [Candidate(Place(name=f'P{i}', point=Point(lon=113.31 + i * .003, lat=23.1)),
+@pytest.mark.parametrize('clustered', [False, True])
+def test_hub_early_stop_covers_all_regions_and_requires_enough_results(monkeypatch, accepted, clustered, region_layout, stop_at):
+    spacing = .003 if clustered else .03
+    candidates = [Candidate(Place(name=f'P{i}', point=Point(lon=113.31 + i * spacing, lat=23.1)),
         'roadside', 0, None, 0, region=f'surface:{i // 24}:{i}', route_index=i // 24)
         for i in range(48)]
+    if region_layout == 'single_surface':
+        for c in candidates:
+            c.route_index = 0
+    elif region_layout == 'late_hub':
+        for i, c in enumerate(candidates):
+            c.route_index = 0
+            c.region = 'hub:late' if i == 40 else 'surface:0'
+    elif region_layout == 'outer_hub':
+        for i, c in enumerate(candidates):
+            c.route_index = 0
+            c.region = 'hub:0' if i < 24 else 'hub:0:outer'
     evaluated = []
 
     async def discover(self, api, request, routes):
@@ -201,7 +215,7 @@ def test_hub_early_stop_uses_shortlist_regions_and_requires_enough_results(monke
     req = request()
     req.preferences.modes = ['taxi']
     result = asyncio.run(calculate_live(req))
-    expected = 24 if accepted >= 6 else 48
+    expected = stop_at if accepted >= 6 and not clustered else 48
     assert result.examined_candidates == len(evaluated) == expected
     assert result.recommendations
     assert result.search_complete is False
@@ -223,7 +237,7 @@ def test_hub_store_spatial_lookup_empty_results_and_namespace(tmp_path, monkeypa
 
 
 def test_hub_first_finds_station_off_corridor_before_exit_search(monkeypatch):
-    hubs = [Place(name=f'枢纽{i}',point=Point(lon=113.4 + i*.015,lat=23.115),citycode='020') for i in range(6)]
+    hubs = [Place(name=f'枢纽{i}',point=Point(lon=113.4 + i*.015,lat=23.13),citycode='020') for i in range(6)]
     seen = []
     async def nearby(self, center, keyword, radius=None):
         assert radius == 5000
@@ -289,11 +303,26 @@ def test_distant_destination_does_not_take_first_recall_center():
     assert recall_centers([driver], C)[0] == C
 
 
-def test_seed_quota_preserves_subway_entrance_and_driver_corridor(monkeypatch):
+def test_long_passenger_branch_recalls_early_divergence_corridor():
+    split = Point(lon=113.9, lat=A.lat)
+    far = Point(lon=split.lon, lat=23.7)
+    driver = road(A, Point(lon=114.5, lat=A.lat))
+    passenger = road(A, far).model_copy(update={'polyline': [A, split, far]})
+    centers = recall_centers([driver, passenger], far, driver_routes=[driver], max_corridor_m=8000)
+    # Sparse whole-route samples can skip the first few km after a long shared ride.
+    assert any(2000 <= project_to_path(point, driver.polyline)[2] <= 8000 for point in centers)
+    assert centers[0] == split
+    assert far in centers
+    assert len(centers) <= 6
+    assert all(haversine_m(a, b) >= 2000 for index, a in enumerate(centers) for b in centers[index + 1:])
+    assert all(point == far or project_to_path(point, driver.polyline)[2] <= 8000 for point in centers)
+
+
+def test_seed_quota_keeps_core_entrance_before_outer_driver_corridor(monkeypatch):
     center = Point(lon=P.lon, lat=23.12)
     places = [Place(name=f'站点{i}', point=Point(lon=P.lon + i * .0001, lat=center.lat))
               for i in range(26)]
-    entrance = Place(name='地铁站A口', point=Point(lon=P.lon, lat=23.14))
+    entrance = Place(name='地铁站A口', point=Point(lon=P.lon, lat=23.135))
     corridor_hub = Place(name='沿司机路线的地铁站', point=P)
 
     async def nearby(*args, **kwargs):
@@ -311,14 +340,20 @@ def test_seed_quota_preserves_subway_entrance_and_driver_corridor(monkeypatch):
     selected = asyncio.run(run())
     assert len(selected) == 25
     assert selected[0] == entrance
-    assert selected[1] == corridor_hub
+    assert corridor_hub not in selected
+    assert all(haversine_m(center, p.point) <= 2200 for p in selected)
 
 
-@pytest.mark.parametrize('hub_lat, expected_supplement', [(23.1, False), (23.2, True)])
-def test_exit_supplement_counts_useful_hubs(monkeypatch, hub_lat, expected_supplement):
+@pytest.mark.parametrize('passenger_available', [False, True])
+@pytest.mark.parametrize('hub_lat,without_branch,with_branch', [
+    (23.1, False, True), (23.14, False, False), (23.2, False, True), (23.4, True, True)])
+@pytest.mark.parametrize('detour', [5, 120])
+def test_exit_supplement_counts_useful_hubs(monkeypatch, hub_lat, without_branch, with_branch, detour, passenger_available):
     supplemented = []
 
     async def driving(self, origin, destination, via=None):
+        if destination == C and not passenger_available:
+            return None
         return road(origin, destination)
 
     async def fetch(self, center, label, kind, region):
@@ -345,11 +380,12 @@ def test_exit_supplement_counts_useful_hubs(monkeypatch, hub_lat, expected_suppl
             baseline.segments[0].name = 'G4高速'
             req = request()
             req.preferences.modes = ['taxi']
+            req.preferences.max_detour_minutes = detour
             return await HubDiscovery().run(AmapClient('test', client), req, [baseline])
 
     result = asyncio.run(run())
     assert len(result.approached) == 8
-    assert bool(supplemented) is expected_supplement
+    assert bool(supplemented) is (with_branch if passenger_available else without_branch)
 
 
 def test_cached_hub_survives_provider_failure(monkeypatch, tmp_path):

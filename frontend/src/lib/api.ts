@@ -1,3 +1,5 @@
+import { beginTrace, finishTrace } from './diagnostics'
+
 export type Point = { lon: number; lat: number }
 export type Place = { name: string; point: Point; citycode?: string | null; poi_id?: string | null }
 export type PlaceSuggestion = Place & { address: string }
@@ -24,6 +26,7 @@ export type TransitStep = {
   via_stops: string[]; entrance: string | null; exit: string | null; instructions: string[]
 }
 export type ModeOption = {
+  direct_walk?: boolean
   mode: Mode; duration_s: number; fare_yuan: number | null
   walking_m: number | null; transfers: number | null; details: string
   route: Point[]; notes: string[]
@@ -70,13 +73,24 @@ export type ManualDropoffResponse = {
 }
 
 async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const trace = beginTrace(path, init)
+  const started = performance.now()
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 115000)
   const abort = () => controller.abort()
   init.signal?.addEventListener('abort', abort, { once: true })
+  if (init.signal?.aborted) controller.abort()
   try {
     const response = await fetch(path, { ...init, signal: controller.signal })
+    trace.status = response.status
+    trace.searchId = response.headers.get('X-Search-ID')
+    trace.release = response.headers.get('X-AlongRoute-Release')
+    trace.logStatus = response.headers.get('X-Search-Log-Status')
     const json = await response.json().catch(() => null)
+    // Replay can be very large; its full payload remains available in the replay panel.
+    trace.response = path.startsWith('/api/search-replay/') && response.ok && Array.isArray(json?.events)
+      ? { search_id: json.search_id, finished: json.finished, event_count: json.events?.length,
+          note: '完整事件请通过回放接口查看；网络记录仅保存摘要' } : json
     if (!response.ok) {
       const message = typeof json?.detail === 'string' ? json.detail : `服务暂不可用 (${response.status})`
       const id = response.headers.get('X-Search-ID')
@@ -85,9 +99,12 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
     if (json === null) throw new Error('服务返回了无法识别的数据，请重试')
     return json as T
   } catch (error) {
-    if (controller.signal.aborted) throw new Error('计算已取消或超时，请重新计算')
+    trace.error = controller.signal.aborted ? '计算已取消或超时，请重新计算' : error instanceof Error ? error.message : String(error)
+    if (controller.signal.aborted) throw new Error(trace.error)
     throw error
   } finally {
+    trace.durationMs = Math.round(performance.now() - started)
+    finishTrace(trace)
     clearTimeout(timer)
     init.signal?.removeEventListener('abort', abort)
   }

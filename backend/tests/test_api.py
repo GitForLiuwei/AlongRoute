@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import pytest
 from app.main import app
 
 
@@ -35,3 +36,24 @@ def test_rejects_invalid_point(monkeypatch):
         'passenger_destination': {'name': 'C', 'point': {'lon': 115, 'lat': 23}}
     })
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize('path,valid_status', [('/api/recommend', 200), ('/api/evaluate-dropoff', 409)])
+@pytest.mark.parametrize('minutes', [0, 120, 121])
+def test_detour_limit_at_http_boundary(monkeypatch, path, valid_status, minutes):
+    monkeypatch.delenv('AMAP_WEB_SERVICE_KEY', raising=False)
+    payload = {
+        'origin': {'name': 'A', 'point': {'lon': 113.3245, 'lat': 23.1065}},
+        'driver_destination': {'name': 'B', 'point': {'lon': 113.3279, 'lat': 23.137}},
+        'passenger_destination': {'name': 'C', 'point': {'lon': 113.269, 'lat': 22.989}},
+        'dropoff': {'name': 'P', 'point': {'lon': 113.32, 'lat': 23.12}},
+        'preferences': {'max_detour_minutes': minutes},
+    }
+    # Valid manual requests reach the live-map requirement in demo mode (409).
+    status = valid_status if minutes <= 120 else 422
+    assert TestClient(app).post(path, json=payload).status_code == status
+
+
+def test_openapi_detour_default_and_maximum():
+    field = TestClient(app).get('/openapi.json').json()['components']['schemas']['Preferences']['properties']['max_detour_minutes']
+    assert field['default'] == field['maximum'] == 120

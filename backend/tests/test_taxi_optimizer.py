@@ -83,17 +83,51 @@ def test_driver_time_tradeoff_by_priority(priority, threshold_s, delta_s, worth_
 def test_nearby_similar_taxi_points_are_collapsed_but_distinct_trips_remain():
     best = candidate("best", 90, 20, shared=600)
     nearby = candidate("nearby", 120, 20, shared=590, lon=113.311)
-    far = candidate("far", 150, 20, shared=580, lon=113.32)
-    cheaper = candidate("cheaper", 90, 19, shared=620, lon=113.311)
-    faster = candidate("faster", 180, 20, shared=300, lon=113.311)
+    far = candidate("far", 150, 20, shared=580, lon=113.34)
+    cheaper = candidate("cheaper", 90, 13, shared=620, lon=113.311)
+    faster = candidate("faster", 180, 20, shared=200, lon=113.311)
     result = rank_recommendations([best, nearby, far, cheaper, faster], Preferences(modes=["taxi"]))
-    assert {rec.id for rec in result} == {"best", "far", "cheaper", "faster"}
+    assert {rec.id for rec in result} == {"nearby", "far", "cheaper", "faster"}
 
 
-@pytest.mark.parametrize("b_fare,first_lon", [(20, 113.32), (None, 113.31)])
+@pytest.mark.parametrize("distance,road,fare_delta,detour_delta,total_delta,redundant", [
+    (2500, "同路", 7, 421, 361, True),
+    (2501, "同路", 0, 0, 0, False),
+    (1500, "邻路", 6, 420, 360, True),
+    (2200, "邻路", 6, 420, 360, True),
+    (2201, "邻路", 6, 420, 360, False),
+    (1500, "邻路", 6.01, 420, 360, False),
+    (1500, "邻路", 6, 421, 360, True),
+    (1500, "邻路", 6, 420, 361, True),
+    (1500, "邻路", 6, -180, -180, True),
+    (1500, "邻路", 6, -181, -180, True),
+    (1500, "邻路", 6, -421, -180, False),
+    (0, "同路", 0, 0, 0, False),
+])
+def test_taxi_cluster_boundaries(monkeypatch, distance, road, fare_delta, detour_delta, total_delta, redundant):
+    from app.optimizer import _is_redundant_taxi_cluster
+    best = candidate("best", 90, 20)
+    other = candidate("other", 90 + detour_delta, 20 + fare_delta)
+    best.dropoff_road, other.dropoff_road = "同路", road
+    best.options[0].total_duration_s = 1200
+    other.options[0].total_duration_s = 1200 + total_delta
+    monkeypatch.setattr("app.optimizer.haversine_m", lambda *_: distance)
+    assert _is_redundant_taxi_cluster(other, best) is redundant
+
+
+def test_same_road_keeps_best_score_regardless_of_input_order():
+    best = candidate("best", 90, 20)
+    nearby = candidate("nearby", 120, 19, shared=700, lon=113.33)
+    best.dropoff_road = nearby.dropoff_road = "普通道路"
+    for recs in ([nearby, best], [best, nearby]):
+        assert [r.id for r in rank_recommendations(recs, Preferences(modes=["taxi"]))] == ["best"]
+
+
+@pytest.mark.parametrize("b_fare,first_lon", [(20, 113.34), (None, 113.31)])
 def test_live_demotes_trips_worse_than_staying_to_b(monkeypatch, b_fare, first_lon):
     a, b, c = Point(lon=113.3, lat=23.1), Point(lon=113.4, lat=23.1), Point(lon=113.5, lat=23.1)
-    points = [Point(lon=113.31, lat=23.1), Point(lon=113.32, lat=23.1)]
+    # Keep the two alternatives outside the same-road cluster so this tests B comparison.
+    points = [Point(lon=113.31, lat=23.1), Point(lon=113.34, lat=23.1)]
     req = RecommendationRequest(origin=Place(name="A", point=a), driver_destination=Place(name="B", point=b),
         passenger_destination=Place(name="C", point=c), preferences=Preferences(modes=["taxi"]))
 
@@ -212,7 +246,8 @@ def test_same_point_subway_switch_and_dual_summary(walk, transit_fare, priority,
     assert rec.model_dump() == original
     if expected == "transit":
         assert "后续建议公共交通" in result.reason
-        assert result.recommendation_label == ""
+        assert result.recommendation_label == "综合推荐"
+        assert result.reason.startswith("综合推荐：")
 
 
 def test_slow_bus_switches_to_taxi_and_keeps_other_transit():

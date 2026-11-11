@@ -6,6 +6,7 @@ import pytest
 from app.amap import AmapClient
 from app.candidates import Candidate, Station, build_candidates, controlled_segment, search_centers
 from app.exit_discovery import FocusedDiscovery
+from app.geometry import haversine_m, project_to_path
 from app.highway import ExitAnchor, discovered_exit, exit_was_used, highway_centers, original_exits
 from app.models import ModeOption, Place, Point, Preferences, Recommendation, RecommendationRequest, RoadSegment, Route
 from app.optimizer import is_viable, preferred_option, rank_recommendations
@@ -169,6 +170,25 @@ def test_highway_to_highway_interchange_is_not_an_original_exit():
     anchors = original_exits(route)
     assert len(anchors) == 1 and anchors[0].original
     assert anchors[0].place.point == B
+
+
+@pytest.mark.parametrize("urban_road", ["城市快速路", "城市高架路"])
+def test_motorway_to_urban_expressway_records_anchor_without_allowing_dropoff(urban_road):
+    route = Route(duration_s=600, distance_m=10000, polyline=[A, E, B, P], segments=[
+        RoadSegment(name="G4高速", polyline=[A, E]),
+        RoadSegment(name=urban_road, polyline=[E, B]),
+        RoadSegment(name="人民路", polyline=[B, P])])
+    anchors = original_exits(route, citycode="020")
+    assert [anchor.place.point for anchor in anchors] == [E, B]
+    transition = anchors[0]
+    assert transition.original and transition.place.citycode == "020"
+    assert haversine_m(transition.approach, E) == pytest.approx(300, abs=1)
+    assert transition.progress_m == pytest.approx(project_to_path(E, route.polyline)[1])
+    request = RecommendationRequest(origin=Place(name="A", point=A),
+        driver_destination=Place(name="B", point=P), passenger_destination=Place(name="C", point=P))
+    candidates = build_candidates(route, [], [], request)
+    assert candidates
+    assert all(candidate.place.point not in (E, B) for candidate in candidates)
 
 
 def test_discovered_exit_must_be_near_the_highway_not_just_a_local_road():

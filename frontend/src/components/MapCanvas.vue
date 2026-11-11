@@ -19,6 +19,7 @@ const jsKey = import.meta.env.VITE_AMAP_JS_KEY || ''
 const liveMap = computed(() => props.result?.mode === 'live' && !!jsKey && props.proxyReady && !mapError.value)
 let map: any = null
 let AMap: any = null
+const directWalk = computed(() => props.active?.options.find(x => x.mode === props.shownMode)?.direct_walk)
 const transitOption = computed(() => props.shownMode === 'transit' ? props.active?.options.find(x => x.mode === 'transit') : null)
 
 const allPoints = computed(() => [
@@ -85,7 +86,7 @@ function drawOnMap() {
   draw(props.result?.baseline_route.polyline, '#9bb9df', 4)
   draw(props.active?.driver_route.polyline, '#2962db', 6)
   draw(props.active?.options.find(x => x.mode === props.shownMode)?.route,
-    props.shownMode === 'taxi' ? '#ee9953' : '#209a74', 5, true)
+    directWalk.value ? '#8a5bbb' : props.shownMode === 'taxi' ? '#ee9953' : '#209a74', 5, true)
   draw(transitOption.value?.boarding_walk_route, '#8a5bbb', 5, true)
   for (const item of markers.value) {
     const maker = new AMap.Marker({
@@ -135,7 +136,7 @@ onBeforeUnmount(() => { map?.destroy(); map = null })
       <polyline v-if="active" :points="plotted(active.driver_route.polyline)" fill="none"
         stroke="#2769dc" stroke-width="6" stroke-linejoin="round" stroke-linecap="round" />
       <polyline v-if="active" :points="plotted(active.options.find(x => x.mode === shownMode)?.route)" fill="none"
-        :stroke="shownMode === 'taxi' ? '#e89b48' : '#209a74'" stroke-dasharray="12 9" stroke-width="5"
+        :stroke="directWalk ? '#8a5bbb' : shownMode === 'taxi' ? '#e89b48' : '#209a74'" stroke-dasharray="12 9" stroke-width="5"
         stroke-linejoin="round" stroke-linecap="round" />
       <polyline v-if="transitOption" :points="plotted(transitOption.boarding_walk_route)" fill="none" stroke="#8a5bbb" stroke-dasharray="5 5" stroke-width="5" />
       <g v-for="m in markers" :key="m.label" :transform="`translate(${xy(m.p)[0]}, ${xy(m.p)[1]})`">
@@ -151,7 +152,8 @@ onBeforeUnmount(() => { map?.destroy(); map = null })
       <span><i class="line-icon driver-line"></i>司机经停路线</span>
       <span><i class="line-icon taxi-line"></i>打车</span>
       <span><i class="line-icon transit-line"></i>公交/地铁</span>
-      <span v-if="transitOption"><i class="line-icon" style="border-color:#8a5bbb"></i>到站步行 · S 上车站</span>
+      <span v-if="directWalk"><i class="line-icon" style="border-color:#8a5bbb"></i>直接步行回家</span>
+      <span v-else-if="transitOption"><i class="line-icon" style="border-color:#8a5bbb"></i>到站步行 · S 上车站</span>
     </div>
   </section>
 </template>

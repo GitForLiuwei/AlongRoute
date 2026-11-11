@@ -61,3 +61,19 @@ def test_map_proxy_keeps_backend_rules(tmp_path, monkeypatch):
             assert (await client.get('/_AMapService/arbitrary')).status_code == 403
             assert (await client.post('/_AMapService/v3/foo')).status_code == 405
     asyncio.run(run())
+
+
+def test_frontend_entry_routes_support_direct_visits_and_refresh(tmp_path):
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=site(tmp_path)), base_url='http://test') as client:
+            index = await client.get('/')
+            for path in ('/user', '/user/', '/debug', '/debug/', '/user?source=bookmark'):
+                response = await client.get(path)
+                assert response.status_code == 200
+                assert response.content == index.content
+                assert response.headers['content-type'].startswith('text/html')
+                assert (await client.head(path)).status_code == 200
+            assert (await client.post('/user')).status_code == 405
+            for path in ('/unknown', '/user/missing', '/assets/missing.js', '/api/missing'):
+                assert (await client.get(path)).status_code == 404
+    asyncio.run(run())

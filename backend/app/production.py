@@ -59,6 +59,10 @@ class ProductionApp:
             return await api(scope, receive, send)
         if path in {"/docs", "/docs/oauth2-redirect", "/openapi.json", "/redoc"}:
             return await api(scope, receive, send)
+        # Explicit frontend routes support direct visits and browser refreshes.
+        # Unknown paths still return 404, including missing assets and API routes.
+        if path in {"/user", "/user/", "/debug", "/debug/"}:
+            scope = {**scope, "path": "/index.html", "raw_path": b"/index.html"}
         return await self.static(scope, receive, send)
 
 
