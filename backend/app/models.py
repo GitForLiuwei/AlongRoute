@@ -24,8 +24,8 @@ class Preferences(BaseModel):
     max_taxi_fare_yuan: int = Field(default=200, ge=0, le=200)
     modes: list[Literal["taxi", "transit"]] = Field(default=["taxi", "transit"])
     priority: Literal["balanced", "time", "cost"] = "balanced"
-    max_walking_m: int = Field(default=1200, ge=0, le=5000)
-    max_transfers: int = Field(default=2, ge=0, le=8)
+    max_walking_m: int = Field(default=3000, ge=0, le=5000)
+    max_transfers: int = Field(default=4, ge=0, le=8)
 
     @field_validator("modes")
     @classmethod

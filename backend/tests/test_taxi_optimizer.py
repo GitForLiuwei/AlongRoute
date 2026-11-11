@@ -80,47 +80,35 @@ def test_driver_time_tradeoff_by_priority(priority, threshold_s, delta_s, worth_
     assert result[0].id == ("fast" if worth_it else "cheap")
 
 
-def test_nearby_similar_taxi_points_are_collapsed_but_distinct_trips_remain():
+def test_nearby_taxi_points_preserve_time_fare_tradeoffs():
     best = candidate("best", 90, 20, shared=600)
     nearby = candidate("nearby", 120, 20, shared=590, lon=113.311)
     far = candidate("far", 150, 20, shared=580, lon=113.34)
     cheaper = candidate("cheaper", 90, 13, shared=620, lon=113.311)
     faster = candidate("faster", 180, 20, shared=200, lon=113.311)
     result = rank_recommendations([best, nearby, far, cheaper, faster], Preferences(modes=["taxi"]))
-    assert {rec.id for rec in result} == {"nearby", "far", "cheaper", "faster"}
+    assert {rec.id for rec in result} == {"best", "nearby", "far", "cheaper", "faster"}
 
 
-@pytest.mark.parametrize("distance,road,fare_delta,detour_delta,total_delta,redundant", [
-    (2500, "同路", 7, 421, 361, True),
-    (2501, "同路", 0, 0, 0, False),
-    (1500, "邻路", 6, 420, 360, True),
-    (2200, "邻路", 6, 420, 360, True),
-    (2201, "邻路", 6, 420, 360, False),
-    (1500, "邻路", 6.01, 420, 360, False),
-    (1500, "邻路", 6, 421, 360, True),
-    (1500, "邻路", 6, 420, 361, True),
-    (1500, "邻路", 6, -180, -180, True),
-    (1500, "邻路", 6, -181, -180, True),
-    (1500, "邻路", 6, -421, -180, False),
-    (0, "同路", 0, 0, 0, False),
+@pytest.mark.parametrize("distance,road,redundant", [
+    (2500, "同路", True), (2501, "同路", False),
+    (300, "邻路", True), (301, "邻路", False), (0, "同路", True),
 ])
-def test_taxi_cluster_boundaries(monkeypatch, distance, road, fare_delta, detour_delta, total_delta, redundant):
+def test_equal_metrics_nearby_taxi_duplicates(monkeypatch, distance, road, redundant):
     from app.optimizer import _is_redundant_taxi_cluster
-    best = candidate("best", 90, 20)
-    other = candidate("other", 90 + detour_delta, 20 + fare_delta)
+    best, other = candidate("best", 90, 20), candidate("other", 90, 20)
     best.dropoff_road, other.dropoff_road = "同路", road
-    best.options[0].total_duration_s = 1200
-    other.options[0].total_duration_s = 1200 + total_delta
+    best.options[0].total_duration_s = other.options[0].total_duration_s = 1200
     monkeypatch.setattr("app.optimizer.haversine_m", lambda *_: distance)
-    assert _is_redundant_taxi_cluster(other, best) is redundant
+    assert bool(_is_redundant_taxi_cluster(other, best)) is redundant
 
 
-def test_same_road_keeps_best_score_regardless_of_input_order():
+def test_same_road_keeps_time_fare_tradeoffs_regardless_of_input_order():
     best = candidate("best", 90, 20)
     nearby = candidate("nearby", 120, 19, shared=700, lon=113.33)
     best.dropoff_road = nearby.dropoff_road = "普通道路"
     for recs in ([nearby, best], [best, nearby]):
-        assert [r.id for r in rank_recommendations(recs, Preferences(modes=["taxi"]))] == ["best"]
+        assert [r.id for r in rank_recommendations(recs, Preferences(modes=["taxi"]))] == ["best", "nearby"]
 
 
 @pytest.mark.parametrize("b_fare,first_lon", [(20, 113.34), (None, 113.31)])
@@ -227,58 +215,58 @@ def test_shorter_bus_walk_cannot_replace_winning_subway(priority):
     assert rank_recommendations([bus, subway], Preferences(modes=["transit"], priority=priority))[0].id == "subway"
 
 
-@pytest.mark.parametrize("walk,transit_fare,priority,expected", [
-    (0, 3, "balanced", "transit"), (200, 3, "cost", "transit"),
-    (201, 3, "balanced", "taxi"), (100, None, "balanced", "taxi"),
-    (100, 3, "time", "taxi"),
-])
-def test_same_point_subway_switch_and_dual_summary(walk, transit_fare, priority, expected):
+@pytest.mark.parametrize("priority", ["balanced", "time", "cost"])
+@pytest.mark.parametrize("walk,transit_fare", [(0, 3), (200, 3), (201, 3), (100, None)])
+def test_same_point_modes_have_separate_cards_without_mutating_input(priority, walk, transit_fare):
     rec = candidate("both", 90, 25)
     transit = transit_candidate("subway", 900, transit_fare).options[0]
     transit.boarding_kind, transit.boarding_walk_m = "subway", walk
     rec.options.append(transit)
     original = rec.model_dump()
-    result = rank_recommendations([rec], Preferences(priority=priority))[0]
-    assert result.suggested_mode == expected
-    assert {o.mode for o in result.options} == {"taxi", "transit"}
-    assert "同点位亦可" in result.reason
-    assert ("同点位亦可打车" if expected == "transit" else "同点位亦可乘地铁") in result.reason
+    result = rank_recommendations([rec], Preferences(priority=priority))
+    assert [(r.id, r.suggested_mode) for r in result] == [("both", "taxi"), ("both", "transit")]
+    assert all(len(r.options) == 1 and r.options[0].mode == r.suggested_mode for r in result)
+    assert all("同点位亦可" not in r.reason for r in result)
+    assert result[0].point == result[1].point
     assert rec.model_dump() == original
-    if expected == "transit":
-        assert "后续建议公共交通" in result.reason
-        assert result.recommendation_label == "综合推荐"
-        assert result.reason.startswith("综合推荐：")
 
 
-def test_slow_bus_switches_to_taxi_and_keeps_other_transit():
-    both = transit_candidate("both", 2400, 2)
-    both.options[0].boarding_kind = "bus"
-    both.options.append(ModeOption(mode="taxi", duration_s=600, fare_yuan=12, details="taxi"))
-    cheap = candidate("taxi-first", 90, 5, shared=0, lon=113.4)
-    other = transit_candidate("other-subway", 900, 4)
-    other.point = Place(name="other", point=Point(lon=113.5, lat=23.1))
-    other.options[0].boarding_stop = other.point
-    other.options[0].boarding_kind = "subway"
-    result = rank_recommendations([both, cheap, other], Preferences())
-    switched = next(r for r in result if r.id == "both")
-    assert switched.suggested_mode == "taxi"
-    assert "后续建议打车" in switched.reason
-    assert "同点位亦可乘公交" in switched.reason
-    assert any(r.suggested_mode == "transit" for r in result)
-
-
-def test_dual_summary_uses_preferred_transit_and_respects_hard_limits():
+def test_separate_transit_card_uses_preferred_option_and_respects_hard_limits():
     rec = candidate("both", 90, 12)
     slow = transit_candidate("slow", 2400, 5).options[0]
     fast = transit_candidate("fast", 900, 2).options[0]
     slow.boarding_kind, fast.boarding_kind = "bus", "subway"
     rec.options.extend([slow, fast])
-    result = rank_recommendations([rec], Preferences())[0]
-    assert "同点位亦可乘地铁" in result.reason
+    result = rank_recommendations([rec], Preferences())
+    assert len(result) == 2
+    assert result[1].options[0].boarding_kind == "subway"
     fast.boarding_walk_m = slow.boarding_walk_m = 301
-    result = rank_recommendations([rec], Preferences())[0]
-    assert "同点位亦可" not in result.reason
-    assert [o.mode for o in result.options] == ["taxi"]
+    result = rank_recommendations([rec], Preferences())
+    assert len(result) == 1 and result[0].suggested_mode == "taxi"
+
+
+def test_wuhe_taxi_survives_nearby_bus_card_and_zhucun_is_dominated():
+    def make(name, lon, lat, detour, total, fare, bus_total=None, walk=None):
+        r = candidate(name, detour, fare, lon=lon)
+        r.point = Place(name="五和大道 · 下车候选", point=Point(lon=lon, lat=lat))
+        r.dropoff_road = "五和大道"
+        r.options[0].total_duration_s = total
+        if bus_total:
+            o = transit_candidate(name, 4000, 5).options[0]
+            o.boarding_kind, o.boarding_walk_m = "bus", walk
+            o.boarding_stop = r.point
+            o.walking_m, o.transfers, o.total_duration_s = walk + 472, 1, bus_total
+            r.options.append(o)
+        return r
+    a = make("wuhe-a", 114.056790742, 22.660853904, 1471, 8531, 33, 10477, 256)
+    b = make("wuhe-b", 114.057844472, 22.661424636, 1673, 8427, 31, 10403, 88)
+    z = make("zhucun", 114.040606, 22.686375, 1508, 8624, 45)
+    z.point.name, z.dropoff_road = "竹村站附近", None
+    result = rank_recommendations([z, b, a], Preferences())
+    assert ("wuhe-a", "taxi") in {(r.id, r.suggested_mode) for r in result}
+    assert ("wuhe-b", "transit") in {(r.id, r.suggested_mode) for r in result}
+    assert all(r.id != "zhucun" for r in result)
+    assert all(len(r.options) == 1 for r in result)
 
 
 def test_transit_keeps_fifteen_minute_cost_budget():
@@ -370,7 +358,57 @@ def test_recommendation_count_for_transit_and_mixed_modes(modes, count):
         rec.options.append(transit)
         recs.append(rec)
     result = rank_recommendations(recs, Preferences(modes=modes))
-    assert len(result) == min(count, 6)
-    assert len({rec.point.point.csv() for rec in result}) == len(result)
+    assert len(result) == min(count * len(modes), 6)
+    assert len({(rec.id, rec.suggested_mode) for rec in result}) == len(result)
+    assert all(len(rec.options) == 1 for rec in result)
     if len(modes) == 2:
-        assert all({option.mode for option in rec.options} == {"taxi", "transit"} for rec in result)
+        assert {rec.suggested_mode for rec in result} == {"taxi", "transit"}
+
+
+def test_mixed_mode_minimum_keeps_second_cost_transit_outside_soft_time_budget():
+    fast = transit_candidate("fast", 600, 20)
+    slow = transit_candidate("slow", 1800, 2)
+    slow.point = Place(name="slow", point=Point(lon=113.32, lat=23.1))
+    taxi = candidate("taxi", 90, 25, lon=113.5)
+    result = rank_recommendations([taxi, fast, slow], Preferences(priority="cost"))
+    assert {r.id for r in result if r.suggested_mode == "transit"} == {"fast", "slow"}
+
+
+def test_same_transit_itinerary_preserves_driver_passenger_tradeoff():
+    fast = transit_candidate("fast", 600, 3)
+    fewer_detours = transit_candidate("fewer-detours", 900, 3)
+    fast.driver_detour_s = 300
+    fewer_detours.point = Place(name="fewer-detours", point=Point(lon=113.312, lat=23.1))
+    fewer_detours.options[0].boarding_stop = fast.options[0].boarding_stop
+    result = rank_recommendations([fast, fewer_detours], Preferences())
+    assert len([r for r in result if r.suggested_mode == "transit"]) == 2
+
+
+def test_fewer_than_two_allowed_when_other_mode_options_are_dominated():
+    good = transit_candidate("good", 600, 3)
+    bad = transit_candidate("bad", 900, 5)
+    result = rank_recommendations([good, bad], Preferences())
+    assert [r.id for r in result] == ["good"]
+
+
+def test_walk_cards_cannot_fill_reserved_vehicle_slots():
+    from app.optimizer import has_mode_minimum
+    taxi_a = candidate("taxi-a",90,20,lon=113.4)
+    taxi_b = candidate("taxi-b",180,10,lon=113.45)
+    walks = []
+    for i in range(4):
+        rec = transit_candidate(f"walk-{i}",60+i*10,0)
+        rec.point = Place(name=rec.id,point=Point(lon=113.31+i*.001,lat=23.1))
+        rec.options[0].direct_walk = True
+        rec.options[0].boarding_stop = None
+        rec.options[0].boarding_walk_m = None
+        walks.append(rec)
+    bus_a = transit_candidate("bus-a",1200,2)
+    bus_a.point = Place(name="bus-a",point=Point(lon=113.335,lat=23.1))
+    bus_b = transit_candidate("bus-b",600,5)
+    bus_b.point = Place(name="bus-b",point=Point(lon=113.33,lat=23.1))
+    result = rank_recommendations([taxi_a,taxi_b,*walks,bus_a,bus_b],Preferences())
+    assert len(result)==6
+    assert len([r for r in result if r.suggested_mode=="transit" and not r.options[0].direct_walk])==2
+    assert len([r for r in result if r.suggested_mode=="taxi"])==2
+    assert has_mode_minimum(result,Preferences())

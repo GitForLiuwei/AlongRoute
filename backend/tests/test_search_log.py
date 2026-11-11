@@ -48,8 +48,8 @@ def test_successful_search_links_request_result_and_timing(logs):
         "origin": {**payload()["origin"], "citycode": None, "poi_id": None},
         "driver_destination": {**payload()["driver_destination"], "citycode": None, "poi_id": None},
         "passenger_destination": {**payload()["passenger_destination"], "citycode": None, "poi_id": None},
-        "preferences": {**payload()["preferences"], "priority": "balanced", "max_walking_m": 1200,
-                        "max_transfers": 2, "max_taxi_fare_yuan": 200}}
+        "preferences": {**payload()["preferences"], "priority": "balanced", "max_walking_m": 3000,
+                        "max_transfers": 4, "max_taxi_fare_yuan": 200}}
     result = next(r for r in data if r["event"] == "route_result")
     assert result["recommendations"] and result["baseline"]["distance_m"] > 0
     assert "driver_route" not in result["recommendations"][0]  # no duplicated raw geometry

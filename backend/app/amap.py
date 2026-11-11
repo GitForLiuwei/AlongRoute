@@ -13,7 +13,7 @@ import httpx
 from .geometry import haversine_m, project_to_path, point_along_path
 from .models import (ModeOption, Place, PlaceSuggestion, Point, Preferences, Recommendation,
                      RecommendationRequest, RecommendationResponse, RoadSegment, Route, ComparisonOption, DrivingStep)
-from .optimizer import _assign_recommendation_labels, MAX_BOARDING_WALK_M, TAXI_WEIGHTS, is_viable, rank_recommendations, option_score, preferred_option, taxi_score_seconds
+from .optimizer import has_mode_minimum, execution_key, _assign_recommendation_labels, MAX_BOARDING_WALK_M, TAXI_WEIGHTS, is_viable, rank_recommendations, option_score, preferred_option, taxi_score_seconds
 from .candidates import (Candidate, Station, build_candidates, search_centers, terminal_is_usable,
                          controlled_segment, restricted_road, dropoff_road_name, spread_items, interleave_groups)
 from .highway import ExitAnchor, highway_centers, original_exits, discovered_exit, exit_was_used
@@ -748,7 +748,9 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                     return
                 # Bound quota use only after six ranked alternatives are available.
                 shortlist = rank_recommendations(results, request.preferences) if len(results) >= 6 else []
-                if len(shortlist) >= 6 and extra > max(r.driver_detour_s for r in shortlist) + 1500:
+                if (len({execution_key(r) for r in shortlist}) >= 6
+                        and has_mode_minimum(shortlist, request.preferences)
+                        and extra > max(r.driver_detour_s for r in shortlist) + 1500):
                     pruned_count += 1
                     reject("detour_bound_pruned", driver_detour_s=extra)
                     return
@@ -805,15 +807,18 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
             for offset in range(0, len(candidates), 8):
                 await asyncio.gather(*(evaluate(c) for c in candidates[offset:offset + 8]))
                 covered_modes = {option.mode for result in results for option in result.options}
+                ranked_so_far = rank_recommendations(results, request.preferences)
                 if (hub_first and offset + 8 >= 24
-                        and len(rank_recommendations(results, request.preferences)) >= 6
+                        and len({execution_key(r) for r in ranked_so_far}) >= 6
+                        and has_mode_minimum(ranked_so_far, request.preferences)
                         and set(request.preferences.modes) <= covered_modes
                         and required_regions <= evaluated_regions):
                     # A bounded shortlist is not an optimality claim; report remaining work below.
                     break
                 # With taxi enabled, continue across the bounded candidate pool:
                 # six feasible points do not establish the detour/fare frontier.
-                if ("taxi" not in pools and len(results) >= 6
+                if ("taxi" not in pools and len({execution_key(r) for r in ranked_so_far}) >= 6
+                        and has_mode_minimum(ranked_so_far, request.preferences)
                         and set(request.preferences.modes) <= covered_modes
                         and required_regions <= evaluated_regions):
                     break
@@ -912,14 +917,22 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
             priority_label = {"balanced": "均衡", "time": "省时间", "cost": "省费用"}[request.preferences.priority]
             warnings.append(f"打车按{priority_label}偏好计算综合分＝司机增加分钟×{w_driver}＋乘客全程分钟×{w_pax}＋预估车费×{sec_per_yuan / 60:.1f}，司机增加超过18分钟的部分追加75%绕行惩罚，越低越优；分数相同时优先省时。双方时间均含相应停靠，乘客时间含共同乘车及后续行程；直接步行无需接车缓冲。")
         if request.preferences.priority == "cost" and "transit" in request.preferences.modes:
-            warnings.append("公共交通省费用仅比较不比当前最快公交候选多耗时15分钟以上的方案；未知费用不视为低价。")
+            warnings.append("公共交通省费用优先比较不比最快公交多耗时15分钟以上的方案；混合模式公交不足两个时，补充未被全面超过的较慢方案。未知费用不视为低价。")
         if not comparisons:
             warnings.append("本次未取得符合接驳约束的对照方案，无法判断中途下车是否优于直接出行。")
         if evaluated_count < len(candidates):
             complete = False
             for candidate in candidates[evaluated_count:]:
                 event("candidate_not_evaluated", reason="early_stop_or_planning_budget", **candidate_trace(candidate))
-            warnings.append("已保留足够可用候选，剩余候选尚未精算，推荐不代表全局最优。")
+            warnings.append("部分候选尚未完成精算，推荐不代表全局最优。")
+        if len(request.preferences.modes) > 1:
+            for mode, label in (("taxi", "打车"), ("transit", "公交 / 地铁")):
+                count = sum(r.suggested_mode == mode and not r.options[0].direct_walk for r in ranked)
+                if count < 2:
+                    explanation = ("仍有候选未完成核验或搜索覆盖受限，不能确认没有更多可用方案"
+                                   if not complete or evaluated_count < len(candidates)
+                                   else "本次候选范围内没有更多通过限制且未被全面超过的独立方案")
+                    warnings.append(f"{label}目前仅有{count}个推荐；{explanation}。")
         if not ranked:
             warnings.append("已搜索范围内暂无符合限制的候选，不代表所有路线均无方案；公交接驳不会自动放宽300米限制。" if "transit" in request.preferences.modes else "已搜索范围内暂无同时满足司机增加时间和乘客打车费用上限的候选；打车不要求靠近公交或地铁。")
         generated = datetime.now(timezone.utc)

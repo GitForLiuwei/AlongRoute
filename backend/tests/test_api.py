@@ -23,7 +23,9 @@ def test_recommend_http(monkeypatch):
     assert response.status_code == 200
     results = response.json()
     assert results['mode'] == 'demo'
-    assert len(results['recommendations']) == 2
+    assert len(results['recommendations']) == 4
+    assert len({(r['id'], r['suggested_mode']) for r in results['recommendations']}) == 4
+    assert all(len(r['options']) == 1 for r in results['recommendations'])
     assert all(x['stop_status'] == 'unverified' for x in results['recommendations'])
 
 
@@ -57,3 +59,9 @@ def test_detour_limit_at_http_boundary(monkeypatch, path, valid_status, minutes)
 def test_openapi_detour_default_and_maximum():
     field = TestClient(app).get('/openapi.json').json()['components']['schemas']['Preferences']['properties']['max_detour_minutes']
     assert field['default'] == field['maximum'] == 120
+
+
+def test_openapi_transit_defaults():
+    properties = TestClient(app).get('/openapi.json').json()['components']['schemas']['Preferences']['properties']
+    assert properties['max_walking_m']['default'] == 3000
+    assert properties['max_transfers']['default'] == 4

@@ -175,9 +175,10 @@ def test_detour_tiers_include_stopping_time_and_preserve_overflow():
 
 
 @pytest.mark.parametrize('region_layout,stop_at', [('single_surface', 24), ('second_surface', 32), ('late_hub', 48), ('outer_hub', 24)])
+@pytest.mark.parametrize('mixed', [False, True])
 @pytest.mark.parametrize('accepted', [5, 6])
 @pytest.mark.parametrize('clustered', [False, True])
-def test_hub_early_stop_covers_all_regions_and_requires_enough_results(monkeypatch, accepted, clustered, region_layout, stop_at):
+def test_hub_early_stop_covers_all_regions_and_requires_enough_results(monkeypatch, accepted, clustered, region_layout, stop_at, mixed):
     spacing = .003 if clustered else .03
     candidates = [Candidate(Place(name=f'P{i}', point=Point(lon=113.31 + i * spacing, lat=23.1)),
         'roadside', 0, None, 0, region=f'surface:{i // 24}:{i}', route_index=i // 24)
@@ -212,10 +213,15 @@ def test_hub_early_stop_covers_all_regions_and_requires_enough_results(monkeypat
     monkeypatch.setenv('AMAP_WEB_SERVICE_KEY', 'offline-test-key')
     monkeypatch.setattr(HubDiscovery, 'run', discover)
     monkeypatch.setattr(AmapClient, 'driving', driving)
+    async def transit(self, place, destination, at, prefs):
+        return [ModeOption(mode='transit', duration_s=900, fare_yuan=3, walking_m=200,
+            transfers=0, boarding_walk_m=100, boarding_stop=place, boarding_kind='bus', details='bus')]
+    monkeypatch.setattr(AmapClient, 'transit', transit)
     req = request()
-    req.preferences.modes = ['taxi']
+    req.preferences.modes = ['taxi', 'transit'] if mixed else ['taxi']
     result = asyncio.run(calculate_live(req))
-    expected = stop_at if accepted >= 6 and not clustered else 48
+    # Six mode cards can describe fewer than six independently evaluated trips.
+    expected = stop_at if accepted >= 6 and not clustered and not mixed else 48
     assert result.examined_candidates == len(evaluated) == expected
     assert result.recommendations
     assert result.search_complete is False
@@ -468,3 +474,44 @@ def test_same_point_different_driver_trip_does_not_merge_modes():
     assert len(result) == 2
     assert all(len(r.options) == 1 for r in result)
     assert {r.options[0].total_duration_s for r in result} == {290,690}
+
+
+@pytest.mark.parametrize("late_bus", [True, False])
+def test_mixed_search_does_not_stop_or_prune_before_second_bus(monkeypatch, late_bus):
+    points = [Point(lon=113.31+i*.003, lat=23.1) for i in range(48)]
+    candidates = [Candidate(Place(name=f"P{i}", point=p, citycode="020"), "roadside", 0, None, 0,
+                            region="hub:0") for i,p in enumerate(points)]
+    evaluated = []
+    async def discover(self, api, req, routes):
+        self.candidates = candidates
+        return self
+    async def driving(self, origin, destination, via=None):
+        if via is not None:
+            i=points.index(via);evaluated.append(i)
+            if i not in [*range(7),47]: return None
+            path=[origin,via,destination]
+            return Route(duration_s=4000 if i==47 else 600+i*30, distance_m=20000,
+                dropoff_duration_s=100 if i==47 else 600-i*30, polyline=path,
+                segments=[RoadSegment(name="普通道路",polyline=path)])
+        return Route(duration_s=600, distance_m=20000, polyline=[origin,destination],
+            fare_yuan=50-points.index(origin)*5 if origin in points[:6] else 190,
+            segments=[RoadSegment(name="普通道路",polyline=[origin,destination])])
+    async def transit(self, place, destination, at, prefs):
+        if place.point not in [points[6],points[47]]:return []
+        last=place.point==points[47]
+        if last and not late_bus:return []
+        return [ModeOption(mode="transit",duration_s=50 if last else 2000,fare_yuan=1 if last else 5,
+            walking_m=200,transfers=0,boarding_walk_m=100,boarding_stop=place,boarding_kind="bus",details="bus")]
+    monkeypatch.setenv("AMAP_WEB_SERVICE_KEY","offline-test-key")
+    monkeypatch.setattr(HubDiscovery,"run",discover)
+    monkeypatch.setattr(AmapClient,"driving",driving)
+    monkeypatch.setattr(AmapClient,"transit",transit)
+    req = request()
+    req.preferences.max_detour_minutes = 120
+    result=asyncio.run(calculate_live(req))
+    assert len(evaluated)==48
+    buses=[r for r in result.recommendations if r.suggested_mode=="transit"]
+    assert len(buses)==(2 if late_bus else 1)
+    assert all(len(r.options)==1 for r in result.recommendations)
+    assert len([r for r in result.recommendations if r.suggested_mode=="taxi"])>=2
+    if not late_bus: assert any("公交 / 地铁目前仅有1个推荐" in w for w in result.warnings)

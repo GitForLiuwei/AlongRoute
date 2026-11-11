@@ -158,12 +158,13 @@ def test_nearby_same_name_cards_keep_routes_verified_at_representative_point(has
     nearby.id = 'nearby'
     nearby.options = [transit(duration=300, fare=2, lon=113.301)]
     result = rank_recommendations([primary, nearby], Preferences())
-    assert len(result) == (1 if has_verified_transit else 2)
-    if has_verified_transit:
-        assert result[0].point.point == primary.point.point
-        option = next(o for o in result[0].options if o.mode == 'transit')
-        assert option.duration_s == 900
-        assert option.boarding_stop.point == primary.point.point
+    assert len(result) == 2
+    taxi = next(r for r in result if r.suggested_mode == 'taxi')
+    bus = next(r for r in result if r.suggested_mode == 'transit')
+    assert taxi.point.point == primary.point.point
+    assert bus.point.point == nearby.point.point
+    assert bus.options[0].duration_s == 300
+    assert bus.options[0].boarding_stop.point == nearby.point.point
 
 
 def test_interleaved_cards_have_sequential_labels_and_matching_reason_prefixes():

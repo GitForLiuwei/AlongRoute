@@ -66,8 +66,8 @@ def test_actual_station_walking_boundary(monkeypatch, distance, accepted):
 
 
 def test_constraints_apply_before_fastest_itinerary_selection(monkeypatch):
-    options = run_transit(monkeypatch, [itinerary(duration=300, walking=1400),
-                                       itinerary(duration=400, transfers=3),
+    options = run_transit(monkeypatch, [itinerary(duration=300, walking=3200),
+                                       itinerary(duration=400, transfers=5),
                                        itinerary(duration=700, walking=500)])
     assert [option.duration_s for option in options] == [700]
 
@@ -231,7 +231,7 @@ def test_access_replaces_original_leg_in_total(monkeypatch):
 
 
 def test_replacement_can_push_whole_trip_over_walking_limit(monkeypatch):
-    item = itinerary(walking=1150)
+    item = itinerary(walking=2950)
     item["segments"][0]["walking"]["distance"] = "100"
     assert run_transit(monkeypatch, [item], access=250) == []
 
@@ -316,3 +316,8 @@ def test_access_tolerance_depends_on_boarding_kind(monkeypatch, kind, delta_s, a
     assert bool(options) is accepted
     if accepted:
         assert options[0].duration_s == 600 + delta_s
+
+
+@pytest.mark.parametrize("walking,transfers,accepted", [(3000,4,True),(3001,4,False),(3000,5,False)])
+def test_new_default_walking_and_transfer_boundaries(monkeypatch, walking, transfers, accepted):
+    assert bool(run_transit(monkeypatch, [itinerary(walking=walking, transfers=transfers)])) is accepted

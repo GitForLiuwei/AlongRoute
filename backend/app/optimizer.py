@@ -97,20 +97,12 @@ def taxi_score_seconds(driver_detour_s: int, option: ModeOption, priority: str =
 
 def _is_redundant_taxi_cluster(rec: Recommendation, ex: Recommendation) -> bool:
     dist_m = haversine_m(rec.point.point, ex.point.point)
-    if dist_m <= 0:
-        return False
-    if rec.dropoff_road and ex.dropoff_road and rec.dropoff_road == ex.dropoff_road and dist_m <= 2500:
-        return True
-    fare_rec = rec.options[0].fare_yuan or 0
-    fare_ex = ex.options[0].fare_yuan or 0
-    dur_rec = rec.options[0].total_duration_s or 0
-    dur_ex = ex.options[0].total_duration_s or 0
-    if dist_m <= 2200 and abs(fare_rec - fare_ex) <= 6:
-        if rec.driver_detour_s >= ex.driver_detour_s - 180 and dur_rec >= dur_ex - 180:
-            return True
-        if abs(rec.driver_detour_s - ex.driver_detour_s) <= 420 and abs(dur_rec - dur_ex) <= 360:
-            return True
-    return False
+    same_metrics = (rec.driver_detour_s == ex.driver_detour_s
+                    and rec.options[0].total_duration_s == ex.options[0].total_duration_s
+                    and rec.options[0].fare_yuan == ex.options[0].fare_yuan)
+    # Proximity alone cannot erase a driver/passenger/fare tradeoff.
+    return same_metrics and (dist_m <= 300 or (
+        bool(rec.dropoff_road) and rec.dropoff_road == ex.dropoff_road and dist_m <= 2500))
 
 
 def _is_severe_overshoot_outlier(rec: Recommendation, best: Recommendation) -> bool:
@@ -282,135 +274,64 @@ def rank_taxi_recommendations(recs: list[Recommendation], prefs: Preferences) ->
     return selected
 
 
-def _enrich_dual_mode_recommendation(rec: Recommendation, prefs: Preferences, selected: list[Recommendation]):
-    if _is_walk_home_rec(rec):
-        return
-    taxis = [option for option in rec.options if option.mode == "taxi"]
-    transits = [option for option in rec.options if option.mode == "transit"]
-    if not taxis or not transits:
-        return
-    taxi = min(taxis, key=lambda option: taxi_score_seconds(rec.driver_detour_s, option, prefs.priority))
-    transit = preferred_option(transits, prefs.priority)
-    taxi_total, transit_total = taxi.total_duration_s, transit.total_duration_s
-    old_mode = rec.suggested_mode
-    if old_mode == "transit":
-        represented = any(other is not rec and other.suggested_mode == "transit" for other in selected)
-        if (represented or len(selected) == 1) and (
-            (transit.boarding_kind != "subway" and taxi.fare_yuan <= 18 and transit_total - taxi_total >= 900)
-            or (prefs.priority == "time" and taxi.fare_yuan <= 25 and transit_total - taxi_total >= 600)
-        ):
-            rec.suggested_mode = "taxi"
-    else:
-        represented = any(other is not rec and other.suggested_mode == "taxi" for other in selected)
-        if (represented or len(selected) == 1) and (
-            transit.boarding_kind == "subway"
-            and transit.boarding_walk_m is not None and transit.boarding_walk_m <= 200
-            and prefs.priority != "time" and transit_total <= taxi_total + 600
-            and transit.fare_yuan is not None and taxi.fare_yuan - transit.fare_yuan >= 15
-        ):
-            rec.suggested_mode = "transit"
-    # The card and detail panel read the first option of each mode.
-    rec.options = [transit, taxi] if rec.suggested_mode == "transit" else [taxi, transit]
-    if rec.suggested_mode != old_mode:
-        chosen = rec.options[0]
-        rec.recommendation_label = "综合推荐" if rec.suggested_mode == "taxi" else ""
-        rec.score = (float(taxi_score_seconds(rec.driver_detour_s, taxi, prefs.priority) / 60)
-                     if rec.suggested_mode == "taxi" else round(option_score(transit, prefs.priority)
-                     + rec.driver_detour_s / 60 * (0.35 if prefs.priority in ("time", "cost") else 1), 2))
-        label = "打车" if rec.suggested_mode == "taxi" else "公共交通"
-        prefix = f"{rec.recommendation_label}：" if rec.recommendation_label else ""
-        fare = f"预估{chosen.fare_yuan:.1f}元" if chosen.fare_yuan is not None else "票价待估"
-        rec.reason = (f"{prefix}司机增加约{rec.driver_detour_s / 60:.1f}分钟（含停靠），"
-                      f"后续建议{label}，{fare}，乘客全程约{chosen.total_duration_s / 60:.1f}分钟；停靠条件待核实。")
-    if "同点位亦可" not in rec.reason:
-        if rec.suggested_mode == "transit":
-            rec.reason += f" 【同点位亦可打车：预估{taxi.fare_yuan:.1f}元，乘客全程约{taxi_total / 60:.1f}分钟】"
-        else:
-            label = "地铁" if transit.boarding_kind == "subway" else "公交"
-            fare = f"{transit.fare_yuan:.1f}元" if transit.fare_yuan is not None else "票价待估"
-            rec.reason += (f" 【同点位亦可乘{label}：{fare}，到站步行{transit.boarding_walk_m}米，"
-                           f"乘客全程约{(transit_total + 59) // 60}分钟】")
-
-
-def _same_station_cluster(a: Recommendation, b: Recommendation) -> bool:
-    """Detect when a taxi card and a transit card refer to the exact same station/dropoff (<300m)."""
-    dist_m = haversine_m(a.point.point, b.point.point)
-    if dist_m <= 0 or dist_m > 300:
-        return False
-    return bool(a.point.name and b.point.name and a.point.name == b.point.name)
+def has_mode_minimum(recs: list[Recommendation], prefs: Preferences) -> bool:
+    """A mixed search needs two independent cards for each requested vehicle mode."""
+    minimum = 2 if len(prefs.modes) > 1 else 1
+    return all(len({execution_key(r) for r in recs
+                    if r.suggested_mode == mode and not r.options[0].direct_walk}) >= minimum
+               for mode in prefs.modes)
 
 
 def rank_recommendations(recs: list[Recommendation], prefs: Preferences) -> list[Recommendation]:
-    taxis = rank_taxi_recommendations(recs, prefs) if "taxi" in prefs.modes else []
-    if "transit" not in prefs.modes:
-        _assign_recommendation_labels(taxis, prefs)
-        return taxis
-    transit_recs = [r.model_copy(deep=True) for r in recs if any(o.mode == "transit" for o in r.options)]
-    transit_prefs = prefs.model_copy(update={"modes": ["transit"]})
-    transits = _rank_transit_recommendations(transit_recs, transit_prefs)
-    if "taxi" not in prefs.modes:
-        _assign_recommendation_labels(transits, prefs)
-        return transits
-    # Independent objectives have no shared numeric score. Interleave the two
-    # shortlists, merging modes only for the same executed driver trip.
-    def available_modes(rec):
-        return {option.mode for original in recs if execution_key(original) == execution_key(rec)
-                for option in original.options if is_viable(option, prefs)}
+    """Interleave independently ranked mode cards without merging nearby dropoffs.
 
-    selected, by_point = [], {}
+    IDs identify the original candidate for diagnostic replay. A displayed card
+    is identified by (id, suggested_mode), including two modes at the same point.
+    """
+    taxis = rank_taxi_recommendations(recs, prefs) if "taxi" in prefs.modes else []
+    transits = []
+    if "transit" in prefs.modes:
+        transit_recs = [r.model_copy(deep=True) for r in recs if any(o.mode == "transit" for o in r.options)]
+        transit_prefs = prefs.model_copy(update={"modes": ["transit"]})
+        transits = _rank_transit_recommendations(transit_recs, transit_prefs)
+        if len(prefs.modes) > 1 and sum(not preferred_option(r.options, prefs.priority).direct_walk for r in transits) < 2:
+            # A soft time preference must not hide the only useful second option.
+            transits = _rank_transit_recommendations(
+                [r.model_copy(deep=True) for r in recs if any(o.mode == "transit" for o in r.options)],
+                transit_prefs, apply_time_budget=False)
+        for rec in transits:
+            rec.options = [preferred_option(rec.options, prefs.priority)]
+    ordered, seen = [], set()
     for index in range(max(len(taxis), len(transits))):
         for group in (taxis, transits):
             if index >= len(group):
                 continue
             rec = group[index]
-            key = execution_key(rec)
-            if key in by_point:
-                existing = by_point[key]
-                for mode in ("taxi", "transit"):
-                    options = [o for o in rec.options if o.mode == mode]
-                    if options and not any(o.mode == mode for o in existing.options):
-                        chosen = (min(options, key=lambda o: taxi_score_seconds(rec.driver_detour_s, o, prefs.priority))
-                                  if mode == "taxi" else preferred_option(options, prefs.priority))
-                        existing.options.append(chosen)
-            elif any(_same_station_cluster(rec, existing)
-                     and rec.suggested_mode != existing.suggested_mode
-                     and {o.mode for o in rec.options} <= available_modes(existing)
-                     for existing in selected):
-                # The kept point is enriched below using its own validated options.
-                continue
-            elif len(selected) < MAX_RECOMMENDATIONS:
-                by_point[key] = rec
-                selected.append(rec)
-    # The shortlist chooses a suggested mode, not the only available mode at P.
-    # Keep other individually viable options available in the detail panel.
-    for rec in selected:
-        for original in recs:
-            if execution_key(original) != execution_key(rec):
-                continue
-            for mode in ("taxi", "transit"):
-                if any(o.mode == mode for o in rec.options):
-                    continue
-                options = []
-                for original_option in original.options:
-                    if original_option.mode != mode or not is_viable(original_option, prefs):
-                        continue
-                    option = original_option.model_copy(deep=True)
-                    if option.total_duration_s is None:
-                        option.total_duration_s = rec.shared_ride_s + rec.stop_duration_s + option.duration_s
-                    options.append(option)
-                if options:
-                    chosen = (min(options, key=lambda o: taxi_score_seconds(rec.driver_detour_s, o, prefs.priority))
-                              if mode == "taxi" else preferred_option(options, prefs.priority))
-                    rec.options.append(chosen)
-    for rec in selected:
-        _enrich_dual_mode_recommendation(rec, prefs, selected)
+            key = (execution_key(rec), rec.suggested_mode)
+            if key not in seen:
+                seen.add(key)
+                ordered.append(rec)
+    # Reserve two vehicle cards per requested mode before filling remaining slots.
+    # A direct walk is useful but cannot stand in for a taxi or a transit trip.
+    reserved = set()
+    if len(prefs.modes) > 1:
+        for mode in prefs.modes:
+            matches = [i for i, r in enumerate(ordered)
+                       if r.suggested_mode == mode and not r.options[0].direct_walk]
+            reserved.update(matches[:2])
+    chosen = set(reserved)
+    for index in range(len(ordered)):
+        if len(chosen) >= MAX_RECOMMENDATIONS:
+            break
+        chosen.add(index)
+    selected = [r for index, r in enumerate(ordered) if index in chosen]
     _assign_recommendation_labels(selected, prefs)
     return selected
 
 
-def _rank_transit_recommendations(recs: list[Recommendation], prefs: Preferences) -> list[Recommendation]:
+def _rank_transit_recommendations(recs: list[Recommendation], prefs: Preferences, *, apply_time_budget=True) -> list[Recommendation]:
     max_detour_s = prefs.max_detour_minutes * 60
-    if prefs.priority == "cost":
+    if prefs.priority == "cost" and apply_time_budget:
         durations = [o.total_duration_s if o.total_duration_s is not None else r.shared_ride_s + r.stop_duration_s + o.duration_s
                      for r in recs if 0 <= r.driver_detour_s <= max_detour_s
                      for o in r.options if is_viable(o, prefs)]
@@ -503,9 +424,10 @@ def _rank_transit_recommendations(recs: list[Recommendation], prefs: Preferences
         best = preferred_option(rec.options, prefs.priority)
         # Keep different platforms/entrances; collapse repeated versions of one itinerary.
         family = (best.mode, best.boarding_stop.point.csv(), best.details) if best.boarding_stop else (best.mode, rec.point.point.csv())
-        if family in families:
+        duplicate_key = (family, dimensions(rec))
+        if duplicate_key in families:
             continue
-        families.add(family)
+        families.add(duplicate_key)
         selected.append(rec)
         if len(selected) == MAX_RECOMMENDATIONS:
             break

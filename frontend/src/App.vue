@@ -50,8 +50,8 @@ const manualMode = ref(false)
 const taxiFareLimit = ref(200)
 const selectedModes = ref<Mode[]>(['taxi', 'transit'])
 const priority = ref<Priority>('balanced')
-const walkLimit = ref(1200)
-const transfers = ref(2)
+const walkLimit = ref(3000)
+const transfers = ref(4)
 const departure = ref('')
 const mode = ref<'demo' | 'live'>('demo')
 const proxyReady = ref(false)
@@ -97,6 +97,28 @@ function useCurrentLocation() {
     error.value = '无法获取当前位置，请检查定位权限，或手动选择起点。'
   }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 })
 }
+function cardKey(r: Recommendation) {
+  return `${r.id}:${r.suggested_mode}`
+}
+function cardMode(r: Recommendation) {
+  const option = r.options.find(o => o.mode === r.suggested_mode)
+  return option?.direct_walk ? '直接步行' : r.suggested_mode === 'taxi' ? '打车' : '公交 / 地铁'
+}
+function pointDistance(a: Place, b: Place) {
+  const rad = Math.PI / 180
+  const dLat = (a.point.lat - b.point.lat) * rad
+  const dLon = (a.point.lon - b.point.lon) * rad
+  return 12742000 * Math.asin(Math.min(1, Math.sqrt(Math.sin(dLat / 2) ** 2
+    + Math.cos(a.point.lat * rad) * Math.cos(b.point.lat * rad) * Math.sin(dLon / 2) ** 2)))
+}
+function nearbyCardNote(r: Recommendation) {
+  const others = (result.value?.recommendations || []).filter(other => cardKey(other) !== cardKey(r))
+  const same = others.find(other => other.point.point.lon === r.point.point.lon && other.point.point.lat === r.point.point.lat)
+  const nearby = others.filter(other => other.point.name === r.point.name && pointDistance(r.point, other.point) > 0
+    && pointDistance(r.point, other.point) <= 300).sort((a, b) => pointDistance(r.point, a.point) - pointDistance(r.point, b.point))[0]
+  return [same ? `同一下车点另有${cardMode(same)}方案` : '',
+    nearby ? `另有同名下车点，相距约${Math.max(1, Math.round(pointDistance(r.point, nearby.point)))}米（直线）` : ''].filter(Boolean).join('；')
+}
 function markerUrl(r: Recommendation) {
   return `https://uri.amap.com/marker?position=${r.point.point.lon},${r.point.point.lat}&name=${encodeURIComponent(r.point.name)}&callnative=1`
 }
@@ -114,7 +136,7 @@ async function copyNegotiation(r: Recommendation) {
   const text = `【顺路下车推荐】建议在「${r.point.name}」下车，司机增加约${duration(r.driver_detour_s)}（含停靠）；我下车后${onward}，乘客全程约${duration(opt.total_duration_s ?? opt.duration_s)}，后续费用${fare(opt.fare_yuan)}。停靠条件待核实。\n司机高德导航（A→P→B）：${navigationUrl(r)}`
   try {
     await navigator.clipboard.writeText(text)
-    copiedCard.value = r.id
+    copiedCard.value = cardKey(r)
     setTimeout(() => { copiedCard.value = '' }, 2200)
   } catch { window.prompt('请复制以下协商文案：', text) }
 }
@@ -139,7 +161,7 @@ watch([origin, driverDestination, passengerDestination, detour, taxiFareLimit, s
   cancel()
 }, { deep: true, flush: 'sync' })
 watch(manualMode, cancel)
-const active = computed<Recommendation | null>(() => result.value?.recommendations.find(x => x.id === selectedId.value) || result.value?.recommendations[0] || null)
+const active = computed<Recommendation | null>(() => result.value?.recommendations.find(x => cardKey(x) === selectedId.value) || result.value?.recommendations[0] || null)
 const activeOption = computed(() => active.value?.options.find(x => x.mode === shownMode.value) || null)
 const canSubmit = computed(() => !!origin.value && !!driverDestination.value && !!passengerDestination.value && selectedModes.value.length > 0)
 const currentPreferences = computed(() => ({ max_detour_minutes: detour.value,
@@ -154,7 +176,7 @@ function toggleMode(next: Mode) {
   }
 }
 function pick(r: Recommendation) {
-  selectedId.value = r.id
+  selectedId.value = cardKey(r)
   shownMode.value = r.suggested_mode
 }
 async function run() {
@@ -184,7 +206,7 @@ async function run() {
     stale.value = false
     expired.value = false
     mode.value = result.value.mode
-    selectedId.value = result.value.recommendations[0]?.id || ''
+    selectedId.value = result.value.recommendations[0] ? cardKey(result.value.recommendations[0]) : ''
     shownMode.value = result.value.recommendations[0]?.suggested_mode || 'taxi'
   } catch (e) {
     if (requestId !== generation) return
@@ -290,8 +312,8 @@ onMounted(async () => {
         <button v-if="!isDebug" class="advanced-toggle" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起更多设置' : '更多设置 · 步行、换乘、出发时间' }}</button>
         <div v-show="isDebug || advancedOpen">
         <div v-if="!manualMode && selectedModes.includes('transit')" class="extra-grid">
-          <label>公交全程步行上限<select v-model.number="walkLimit"><option :value="500">500 米</option><option :value="1000">1000 米</option><option :value="1200">1200 米</option><option :value="2000">2000 米</option></select></label>
-          <label>最大换乘次数<select v-model.number="transfers"><option :value="0">不换乘</option><option :value="1">1 次</option><option :value="2">2 次</option><option :value="3">3 次</option></select></label>
+          <label>公交全程步行上限<select v-model.number="walkLimit"><option :value="500">500 米</option><option :value="1000">1000 米</option><option :value="1200">1200 米</option><option :value="2000">2000 米</option><option :value="3000">3000 米</option></select></label>
+          <label>最大换乘次数<select v-model.number="transfers"><option :value="0">不换乘</option><option :value="1">1 次</option><option :value="2">2 次</option><option :value="3">3 次</option><option :value="4">4 次</option></select></label>
         </div>
         <label class="departure-label">出发时间（中国时间，可选）<input v-model="departure" type="datetime-local" /></label>
         </div>
@@ -335,17 +357,17 @@ onMounted(async () => {
           <p v-if="isDebug && result" class="journey-summary">计算时间：{{ arrival(result.generated_at) }} · 参考出发：{{ arrival(result.departure_at ?? null) }}</p>
           <p v-if="isDebug && result?.search_id" class="journey-summary">搜索编号：{{ result.search_id }} · 用于查询本地搜索日志</p>
           <div v-if="error" class="notice error-notice"><CircleAlert :size="18" /> {{ error }}</div>
-          <div v-if="result?.warnings?.length" class="notice caution-notice"><ShieldAlert :size="18" /><div><strong>{{ result.mode === 'demo' ? '当前是模拟演示，不可用于真实出行' : '结果仅为待确认候选' }}</strong><p v-for="warning in result.warnings" :key="warning">{{ warning }}</p></div></div>
           <div v-if="!result && !error" class="empty-state"><MapPin :size="26"/><strong>填写行程，开始智能规划</strong><p>先比较司机绕路成本，再计算乘客后续交通方案。</p></div>
           <div v-else-if="result && !result.recommendations.length" class="empty-state"><BadgeHelp :size="28"/><strong>暂无符合条件的候选点</strong><p>请先检查搜索是否完成及服务状态，再考虑调整行程；仅公交 / 地铁方案的到站步行上限为300米。</p></div>
 
           <CandidateReplay v-if="isDebug" :search-id="result?.search_id" />
 
           <div v-if="result?.recommendations.length" class="result-grid">
-            <article v-for="(r, idx) in result.recommendations" :key="r.id" class="recommendation-card" tabindex="0" :aria-label="`选择${r.point.name}`" @keydown.enter.self="pick(r)" @keydown.space.self.prevent="pick(r)" :class="{ picked: active?.id === r.id }" @click="pick(r)">
-              <div class="card-header"><span class="card-index">0{{ idx + 1 }}</span><span class="card-title">{{ r.point.name }}</span><span v-if="r.recommendation_label || idx === 0" class="best-chip">{{ r.recommendation_label || (snapshot?.preferences.priority === 'cost' ? '费用优选' : snapshot?.preferences.priority === 'time' ? '时间优选' : '综合优选') }}</span></div>
+            <article v-for="(r, idx) in result.recommendations" :key="cardKey(r)" class="recommendation-card" tabindex="0" :aria-label="`选择${r.point.name} · ${cardMode(r)}`" @keydown.enter.self="pick(r)" @keydown.space.self.prevent="pick(r)" :class="{ picked: active && cardKey(active) === cardKey(r) }" @click="pick(r)">
+              <div class="card-header"><span class="card-index">0{{ idx + 1 }}</span><span class="card-title">{{ r.point.name }} · {{ cardMode(r) }}</span><span v-if="r.recommendation_label || idx === 0" class="best-chip">{{ r.recommendation_label || (snapshot?.preferences.priority === 'cost' ? '费用优选' : snapshot?.preferences.priority === 'time' ? '时间优选' : '综合优选') }}</span></div>
               <p class="card-driver-total"><span>司机总时间（含停靠）</span><strong>{{ duration(r.driver_route.duration_s + r.stop_duration_s) }}</strong></p>
               <div class="card-stats"><div><span>司机增加约</span><strong class="green-stat">+{{ detourDuration(r.driver_detour_s) }}</strong></div><div><span>乘客全程</span><strong>{{ duration(r.options.find(x => x.mode === r.suggested_mode)?.total_duration_s ?? 0) }}</strong></div><div><span>后续费用</span><strong>{{ fare(r.options.find(x => x.mode === r.suggested_mode)?.fare_yuan ?? null) }}</strong></div></div>
+              <p v-if="nearbyCardNote(r)" class="card-access">{{ nearbyCardNote(r) }}</p>
               <p v-if="isDebug" class="card-location">P · {{ coordinates(r.point.point) }}</p>
               <p v-if="r.options.find(x => x.mode === r.suggested_mode)?.mode === 'transit' && !r.options.find(x => x.mode === r.suggested_mode)?.direct_walk" class="card-access">到站步行 {{ r.options.find(x => x.mode === 'transit')?.boarding_walk_m }} 米 · 公交 / 地铁</p>
               <div class="card-foot"><span><ShieldAlert :size="13"/>待核实上下客</span><ChevronRight :size="17" /></div>
@@ -353,19 +375,19 @@ onMounted(async () => {
                 <template v-if="result.mode === 'live' && !stale && !expired">
                   <a :href="navigationUrl(r)" target="_blank" rel="noopener noreferrer">🚗 司机一键导航（A→P→B）</a>
                   <a :href="markerUrl(r)" target="_blank" rel="noopener noreferrer">📍 查看下车点</a>
-                  <button @click="copyNegotiation(r)">{{ copiedCard === r.id ? '✅ 已复制' : '📋 复制微信文案' }}</button>
+                  <button @click="copyNegotiation(r)">{{ copiedCard === cardKey(r) ? '✅ 已复制' : '📋 复制微信文案' }}</button>
                 </template>
               </div>
             </article>
           </div>
 
           <button v-if="active && !isDebug" class="advanced-toggle route-toggle" :aria-expanded="routeDetailsOpen" @click="routeDetailsOpen = !routeDetailsOpen">{{ routeDetailsOpen ? '收起司机路线详情' : '查看司机路线详情' }}</button>
-          <DriverItinerary v-if="active && result && (isDebug || routeDetailsOpen)" :key="active.id" :origin="snapshot?.origin ?? null"
+          <DriverItinerary v-if="active && result && (isDebug || routeDetailsOpen)" :key="cardKey(active)" :origin="snapshot?.origin ?? null"
             :destination="snapshot?.driver_destination ?? null" :baseline="result.baseline_route"
             :recommendation="active" :demo="result.mode === 'demo'" />
 
           <div v-if="active" class="detail-panel">
-            <div class="detail-title"><div><span class="eyebrow">SELECTED STOP</span><h3>{{ active.point.name }}</h3></div><span class="unverified-badge"><CircleAlert :size="14"/>未验证停靠合法性</span></div>
+            <div class="detail-title"><div><span class="eyebrow">SELECTED STOP</span><h3>{{ active.point.name }} · {{ cardMode(active) }}</h3></div><span class="unverified-badge"><CircleAlert :size="14"/>未验证停靠合法性</span></div>
             <p v-if="isDebug" class="dropoff-location">{{ active.dropoff_road ? `所在道路：${active.dropoff_road} · ` : '' }}GCJ-02 坐标：{{ coordinates(active.point.point) }}<br />{{ active.candidate_source === 'roadside' ? '这是道路采样点，尚未对应到具体场所或停车入口。' : '候选名称用于辨认周边位置，实际下车位置以地图 P 标记为准。' }}</p>
             <p v-if="active.highway_exit" class="journey-summary">{{ active.original_exit ? '司机原路线驶出区域' : '提前驶出高速' }}：{{ active.highway_exit.name }} · 已计入司机后续行程耗时</p>
             <p class="reason">{{ active.reason }}</p><p v-if="active.comparison" class="reason">{{ active.comparison }}</p>
