@@ -5,6 +5,7 @@ import { ArrowRight, BadgeHelp, BusFront, CarFront, Check, ChevronRight, CircleA
   ShieldAlert, SlidersHorizontal, Sparkles, Wallet, X } from 'lucide-vue-next'
 import { wgs84ToGcj02 } from './lib/coordinates'
 import PlaceField from './components/PlaceField.vue'
+import SmartPlanner from './components/SmartPlanner.vue'
 import MapCanvas from './components/MapCanvas.vue'
 import TransitItinerary from './components/TransitItinerary.vue'
 import DriverItinerary from './components/DriverItinerary.vue'
@@ -24,7 +25,7 @@ const advancedOpen = ref(false)
 const routeDetailsOpen = ref(false)
 function syncPage() {
   isDebug.value = debugPageFromLocation()
-  document.title = isDebug.value ? '开发调试 · 顺路下车' : '顺路下车 · 行程规划'
+  document.title = isDebug.value ? '开发调试 · 顺路达' : '顺路达 AlongRoute · 顺路下车点推荐'
   if (!isDebug.value) manualMode.value = false
 }
 function navigatePage(event: MouseEvent, path: '/user' | '/debug') {
@@ -67,11 +68,9 @@ const locating = ref(false)
 const elapsed = ref(0)
 let progressTimer: ReturnType<typeof setInterval> | null = null
 const progressStages = [
-  { t: 0, percent: 12, text: '1/5 规划司乘基准路线' },
-  { t: 3, percent: 32, text: '2/5 搜索沿途出口与交通枢纽' },
-  { t: 8, percent: 52, text: '3/5 比较候选下车点' },
-  { t: 15, percent: 78, text: '4/5 核验经停路线与接驳步行' },
-  { t: 28, percent: 92, text: '5/5 综合比较出行方案' },
+  { t: 0, percent: 18, text: '1/4 规划司机主干路线' },
+  { t: 3, percent: 42, text: '2/4 搜索沿途候选点' },
+  { t: 8, percent: 78, text: '3/4 核验路网与接驳方案' },
 ]
 const progressStage = computed(() => [...progressStages].reverse().find(s => elapsed.value >= s.t)!)
 function stopProgress() {
@@ -249,7 +248,89 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="page" :class="isDebug ? 'debug-page' : 'user-page'">
+  <SmartPlanner v-if="!isDebug" :result="result" :active="active" :snapshot="snapshot"
+    :origin="origin" :driver-destination="driverDestination" :passenger-destination="passengerDestination"
+    :shown-mode="shownMode" :proxy-ready="proxyReady" :mode="mode" :loading="loading" :elapsed="elapsed"
+    :error="error" :stale="stale" :expired="expired" :can-submit="canSubmit"
+    @run="run" @cancel="cancel" @pick="pick">
+    <template #navigation><a href="/debug" @click="navigatePage($event, '/debug')">开发调试</a></template>
+    <template #trip>
+      <PlaceField v-model="origin" kind="origin" label="共同出发地" placeholder="搜索司机与乘客的出发位置" />
+      <PlaceField v-model="driverDestination" kind="driver" label="司机目的地" placeholder="搜索司机目的地" />
+      <PlaceField v-model="passengerDestination" kind="passenger" label="乘客目的地" placeholder="搜索您的目的地" />
+      <button class="current-location" :disabled="locating" @click="useCurrentLocation"><MapPin :size="14" />{{ locating ? '正在定位…' : '使用当前位置' }}</button>
+    </template>
+    <template #preferences>
+        <div class="setting-row"><label for="detour">司机最多增加总时间（含停靠）</label><strong class="detour-value">{{ detour }} <small>分钟</small></strong></div>
+        <input id="detour" v-model.number="detour" class="detour-slider" type="range" min="0" max="120" step="1" :style="{ '--progress': `${detour / 120 * 100}%` }" />
+        <div class="range-ends"><span>0 分钟 · 不接受额外耗时</span><span>120 分钟 · 2 小时</span></div>
+
+        <label v-if="!manualMode" class="form-label">朋友下车后的交通方式</label>
+        <div v-if="!manualMode" class="transport-toggles">
+          <button :class="{ checked: selectedModes.includes('taxi') }" @click="toggleMode('taxi')"><CarFront :size="19" />打车 <Check v-if="selectedModes.includes('taxi')" :size="15" /></button>
+          <button :class="{ checked: selectedModes.includes('transit') }" @click="toggleMode('transit')"><BusFront :size="19" />公交 / 地铁 <Check v-if="selectedModes.includes('transit')" :size="15" /></button>
+        </div>
+        <div v-if="manualMode || selectedModes.includes('taxi')" class="taxi-budget-control">
+          <div class="setting-row"><label for="taxi-fare-limit">乘客打车费用上限</label><strong class="detour-value">{{ taxiFareLimit }} <small>元</small></strong></div>
+          <input id="taxi-fare-limit" v-model.number="taxiFareLimit" class="detour-slider" type="range" min="0" max="200" step="1" :style="{ '--progress': `${taxiFareLimit / 200 * 100}%` }" />
+          <div class="range-ends"><span>0 元</span><span>200 元</span></div>
+          <p v-if="isDebug" class="transit-rule">{{ manualMode ? '测试模式会展示超出预算的测算结果，并标明是否在预算内。' : '仅推荐预估打车费不超过此金额的方案；费用未知时不推荐打车。' }}</p>
+        </div>
+        <p v-if="isDebug && !manualMode && selectedModes.includes('transit')" class="transit-rule"><BusFront :size="14" /> 仅公交 / 地铁方案要求到实际站台或入口步行≤300米，并尽量送近；打车不受此限制。</p>
+        <label v-if="!manualMode" class="form-label">推荐偏好</label>
+        <div v-if="!manualMode" class="priority-tabs">
+          <button :class="{ active: priority === 'balanced' }" @click="priority = 'balanced'">均衡推荐</button>
+          <button :class="{ active: priority === 'time' }" @click="priority = 'time'">省时间</button>
+          <button :class="{ active: priority === 'cost' }" @click="priority = 'cost'">省费用</button>
+        </div>
+        <p v-if="isDebug && !manualMode && selectedModes.includes('taxi')" class="transit-rule">打车按所选偏好综合比较司机增加时间、乘客全程时间和车费：省时间更重视耗时，省费用更重视车费，均衡兼顾两者。费用上限与司机绕路上限仍生效。</p>
+        <button v-if="!isDebug" class="advanced-toggle" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen">{{ advancedOpen ? '收起更多设置' : '更多设置 · 步行、换乘、出发时间' }}</button>
+        <div v-show="isDebug || advancedOpen">
+        <div v-if="!manualMode && selectedModes.includes('transit')" class="extra-grid">
+          <label>公交全程步行上限<select v-model.number="walkLimit"><option :value="500">500 米</option><option :value="1000">1000 米</option><option :value="1200">1200 米</option><option :value="2000">2000 米</option><option :value="3000">3000 米</option></select></label>
+          <label>最大换乘次数<select v-model.number="transfers"><option :value="0">不换乘</option><option :value="1">1 次</option><option :value="2">2 次</option><option :value="3">3 次</option><option :value="4">4 次</option></select></label>
+        </div>
+        <label class="departure-label">出发时间（中国时间，可选）<input v-model="departure" type="datetime-local" /></label>
+        </div>
+
+    </template>
+    <template #details>
+          <button v-if="active && !isDebug" class="advanced-toggle route-toggle" :aria-expanded="routeDetailsOpen" @click="routeDetailsOpen = !routeDetailsOpen">{{ routeDetailsOpen ? '收起司机路线详情' : '查看司机路线详情' }}</button>
+          <DriverItinerary v-if="active && result && (isDebug || routeDetailsOpen)" :key="cardKey(active)" :origin="snapshot?.origin ?? null"
+            :destination="snapshot?.driver_destination ?? null" :baseline="result.baseline_route"
+            :recommendation="active" :demo="result.mode === 'demo'" />
+
+          <div v-if="active" class="detail-panel">
+            <div class="detail-title"><div><span class="eyebrow">SELECTED STOP</span><h3>{{ active.point.name }} · {{ cardMode(active) }}</h3></div><span class="unverified-badge"><CircleAlert :size="14"/>未验证停靠合法性</span></div>
+            <p v-if="isDebug" class="dropoff-location">{{ active.dropoff_road ? `所在道路：${active.dropoff_road} · ` : '' }}GCJ-02 坐标：{{ coordinates(active.point.point) }}<br />{{ active.candidate_source === 'roadside' ? '这是道路采样点，尚未对应到具体场所或停车入口。' : '候选名称用于辨认周边位置，实际下车位置以地图 P 标记为准。' }}</p>
+            <p v-if="active.highway_exit" class="journey-summary">{{ active.original_exit ? '司机原路线驶出区域' : '提前驶出高速' }}：{{ active.highway_exit.name }} · 已计入司机后续行程耗时</p>
+            <p class="reason">{{ active.reason }}</p><p v-if="active.comparison" class="reason">{{ active.comparison }}</p>
+            <p v-if="isDebug" class="journey-summary">额外驾驶 {{ duration(active.driving_extra_s ?? Math.max(0, active.driver_detour_s - active.stop_duration_s)) }} · 停靠 {{ duration(active.stop_duration_s) }}</p>
+            <p v-if="isDebug" class="journey-summary">共同乘车 {{ duration(active.shared_ride_s) }} ＋ 停靠 {{ active.stop_duration_s / 60 }} 分钟 ＋ 下车后行程</p>
+            <div class="detail-modes">
+              <button v-for="o in active.options" :key="o.mode" class="detail-mode" :class="{ active: shownMode === o.mode }" @click="shownMode = o.mode">
+                <div class="mode-name"><CarFront v-if="o.mode === 'taxi'" :size="18" /><BusFront v-else :size="18" />{{ o.direct_walk ? '¥0 · 直接步行回家' : o.mode === 'taxi' ? '打车方案' : '公交 / 地铁' }}</div>
+                <div class="mode-values"><strong>全程 {{ duration(o.total_duration_s ?? o.duration_s) }}</strong><strong>{{ fare(o.fare_yuan) }}</strong></div>
+                <span class="mode-description">下车后 {{ duration(o.duration_s) }} · 预计 {{ arrival(o.arrival_at) }} 到达</span>
+                <span class="mode-description">{{ o.direct_walk ? `步行 ${o.walking_m} 米，无需接车或换乘` : o.mode === 'taxi' ? '含假设5分钟接车缓冲，实际等待和上车位置待确认' : `到站步行 ${o.boarding_walk_m} 米 · 全程步行 ${o.walking_m} 米 · 换乘 ${o.transfers} 次` }}</span>
+              </button>
+            </div>
+            <div v-if="activeOption?.mode === 'transit' && activeOption.boarding_stop" class="boarding-summary"><BusFront :size="17" /><div><strong>{{ activeOption.boarding_stop.name }}</strong><p>沿步行路线 {{ activeOption.boarding_walk_m }} 米到达{{ activeOption.boarding_kind === 'subway' ? '地铁入口' : '公交站台' }}，符合300米限制；同等条件优先更靠近站点的下客位置。</p></div></div>
+            <details v-if="activeOption?.mode === 'transit' && !activeOption.direct_walk" class="onward-details" :open="isDebug"><summary>查看公交 / 地铁乘坐步骤</summary><TransitItinerary :option="activeOption" /></details>
+            <div v-if="activeOption" class="option-note"><Info :size="15" /><span>{{ activeOption.details }}。{{ activeOption.notes.join('；') }}。</span></div>
+            <div class="detail-actions">
+              <button class="secondary-action" :disabled="result?.mode !== 'live' || stale || expired" @click="viewPlace"><ExternalLink :size="16"/>在高德查看候选位置</button>
+              <button class="secondary-action" :disabled="result?.mode !== 'live' || stale || expired" @click="copyPlace"><Check v-if="copied" :size="16"/><MapPin v-else :size="16"/>{{ copied ? '已复制' : '复制候选位置' }}</button>
+            </div>
+          </div>
+          <details v-if="result?.comparisons?.length" class="detail-panel" :open="isDebug"><summary>其他出行方式对照</summary>
+            <div v-for="comparison in result.comparisons" :key="comparison.label"><strong>{{ comparison.label }}</strong>
+              <div v-for="(o, index) in comparison.options" :key="index"><p>{{ o.mode === 'taxi' ? '打车' : '公交 / 地铁' }} · 全程 {{ duration(o.total_duration_s ?? o.duration_s) }} · {{ fare(o.fare_yuan) }}<span v-if="o.walking_m != null"> · 步行{{ o.walking_m }}米</span></p><details v-if="o.mode === 'transit'"><summary>查看公共交通乘坐方式</summary><TransitItinerary :option="o" /></details></div>
+            </div></details>
+
+    </template>
+  </SmartPlanner>
+  <div v-else class="page" :class="isDebug ? 'debug-page' : 'user-page'">
     <header class="topbar">
       <div class="brand">
         <div class="brand-mark"><Route :size="24" :stroke-width="2.7" /></div>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onBeforeUnmount } from 'vue'
+import { ref, watch, onBeforeUnmount, useId } from 'vue'
 import { MapPin, Navigation, UserRound, Search } from 'lucide-vue-next'
 import { apiGet, type Place, type PlaceSuggestion } from '../lib/api'
 
@@ -10,6 +10,7 @@ const props = defineProps<{
   placeholder: string
 }>()
 const emit = defineEmits<{ 'update:modelValue': [value: Place | null] }>()
+const inputId = useId()
 const textValue = ref(props.modelValue?.name || '')
 const focused = ref(false)
 const suggestions = ref<PlaceSuggestion[]>([])
@@ -72,8 +73,8 @@ onBeforeUnmount(() => { sequence++; clearTimeout(timer); clearTimeout(blurTimer)
       <UserRound v-else :size="17" />
     </div>
     <div class="place-input-wrap">
-      <label>{{ label }}</label>
-      <input :value="textValue" :placeholder="placeholder" autocomplete="off"
+      <label :for="inputId">{{ label }}</label>
+      <input :id="inputId" :value="textValue" :placeholder="placeholder" autocomplete="off"
         @input="typeValue" @focus="focused = true" @blur="loseFocus" />
       <p v-if="!modelValue && textValue" class="unselected">请从搜索建议中选择地点</p>
     </div>

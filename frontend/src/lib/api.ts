@@ -109,7 +109,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
     init.signal?.removeEventListener('abort', abort)
   }
 }
-export function apiGet<T>(path: string): Promise<T> { return requestJson<T>(path) }
+export function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> { return requestJson<T>(path, { signal }) }
 export function apiPost<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   return requestJson<T>(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal })
 }
