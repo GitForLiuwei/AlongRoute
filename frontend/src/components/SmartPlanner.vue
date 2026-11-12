@@ -92,7 +92,7 @@ const candidateReplay = ref<CandidateReplayResponse | null>(null)
 const replayLoading = ref(false)
 const diagnosticCandidates = computed(() => projectionCandidates(candidateReplay.value?.events || [], props.result?.recommendations || []))
 const screeningCandidates = computed<ProjectionCandidate[]>(() => {
-  const candidates = [...diagnosticCandidates.value]
+  const candidates = diagnosticCandidates.value.filter(c => c.status !== 'pending')
   const ids = new Set(candidates.map(c => c.recommendationId).filter(Boolean))
   for (const r of props.result?.recommendations || []) if (!ids.has(r.id)) {
     ids.add(r.id)

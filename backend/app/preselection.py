@@ -3,8 +3,8 @@ from .candidates import interleave_groups
 from .search_log import event
 
 
-MAX_CANDIDATES = 48
-SURFACE_RESERVE = 12
+MAX_CANDIDATES = 24
+SURFACE_RESERVE = 6
 
 
 def candidate_key(candidate):

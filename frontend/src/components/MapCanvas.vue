@@ -55,7 +55,7 @@ const allPoints = computed(() => [
   ...(props.result?.baseline_route.polyline || []),
   ...(props.result?.recommendations.flatMap(r => [r.point.point, ...r.driver_route.polyline,
     ...r.options.flatMap(o => [...o.route, ...o.boarding_walk_route, ...(o.boarding_stop ? [o.boarding_stop.point] : [])])]) || []),
-  ...(props.candidates || []).map(c => c.point),
+  ...(props.candidates || []).flatMap(c => [c.point, ...(c.driverPolyline || []), ...(c.passengerPolyline || [])]),
 ].filter(validGeoPoint))
 const projector = computed(() => createGeoProjector(allPoints.value))
 function xy(p: Point): [number, number] { return projector.value(p) }
@@ -65,6 +65,23 @@ function plotted(points: Point[] | undefined): string {
 const diagnosticPoints = computed(() => props.candidates || [])
 const inspectingCandidate = computed(() => diagnosticPoints.value.find(c => c.key === props.inspectKey))
 const inspectingRecommendation = computed(() => props.result?.recommendations.find(r => r.id === inspectingCandidate.value?.recommendationId))
+const inspectingDriverLine = computed<Point[]>(() => {
+  const cand = inspectingCandidate.value
+  if (!cand) return []
+  if (cand.driverPolyline && cand.driverPolyline.length >= 2) return cand.driverPolyline
+  if (inspectingRecommendation.value?.driver_route.polyline?.length) return inspectingRecommendation.value.driver_route.polyline
+  if (props.origin && props.driverDestination) return [props.origin.point, cand.point, props.driverDestination.point]
+  return []
+})
+const inspectingPassengerLine = computed<Point[]>(() => {
+  const cand = inspectingCandidate.value
+  if (!cand) return []
+  if (cand.passengerPolyline && cand.passengerPolyline.length >= 2) return cand.passengerPolyline
+  const opt = inspectingRecommendation.value?.options.find(o => o.mode === inspectingRecommendation.value?.suggested_mode)
+  if (opt?.route?.length) return opt.route
+  if (props.passengerDestination) return [cand.point, props.passengerDestination.point]
+  return []
+})
 const visibleDiagnostics = computed(() => {
   if (stage.value === 4) return props.showRemoved ? diagnosticPoints.value.filter(c => c.status === 'rejected') : []
   if (stage.value !== 2 && stage.value !== 3) return []
@@ -186,9 +203,14 @@ onBeforeUnmount(() => { disposed = true; map?.destroy(); map = null })
       <path v-if="!planner" d="M20 520 Q190 470 275 290 T760 45" fill="none" stroke="#f8fbf7" stroke-width="30" />
       <polyline v-if="planner && !result && origin && driverDestination" :points="plotted([origin.point, driverDestination.point])" fill="none" stroke="#3b82f6" stroke-width="2" stroke-dasharray="5 9" opacity=".4" />
       <polyline v-if="planner && result && stage >= 2" :points="plotted(result.baseline_route.polyline)" fill="none" stroke="#3b82f6" stroke-width="60" opacity=".1" stroke-linecap="round" stroke-linejoin="round" />
-      <g v-if="planner && stage === 3 && inspectingRecommendation" class="inspection-routes">
-        <polyline :points="plotted(inspectingRecommendation.driver_route.polyline)" fill="none" stroke="#2563eb" stroke-width="7" opacity=".75" />
-        <polyline :points="plotted(inspectingRecommendation.options.find(o => o.mode === inspectingRecommendation?.suggested_mode)?.route)" fill="none" stroke="#059669" stroke-width="5" stroke-dasharray="8 6" class="route-flow" />
+      <g v-if="planner && stage === 3 && inspectingCandidate" class="inspection-routes">
+        <polyline v-if="inspectingDriverLine.length >= 2" :points="plotted(inspectingDriverLine)" fill="none"
+          :stroke="inspectingCandidate.status === 'rejected' ? '#dc2626' : '#2563eb'"
+          stroke-width="6" :stroke-dasharray="inspectingCandidate.status === 'rejected' ? '10 6' : undefined"
+          opacity=".88" stroke-linecap="round" stroke-linejoin="round" />
+        <polyline v-if="inspectingPassengerLine.length >= 2" :points="plotted(inspectingPassengerLine)" fill="none"
+          :stroke="inspectingCandidate.status === 'rejected' ? '#ef4444' : '#059669'"
+          stroke-width="5" stroke-dasharray="8 6" class="route-flow" stroke-linecap="round" stroke-linejoin="round" />
       </g>
       <polyline :class="{ 'route-reveal': planner && stage === 1 }" pathLength="1000" v-if="result" :points="plotted(result.baseline_route.polyline)" fill="none"
         :stroke="planner ? '#2563eb' : '#a2bedf'" stroke-width="10" stroke-linejoin="round" stroke-linecap="round" />
@@ -206,7 +228,11 @@ onBeforeUnmount(() => { disposed = true; map?.destroy(); map = null })
             <circle r="9" :fill="inspected(candidate) && candidate.status === 'rejected' ? '#fee2e2' : diagnosticColor(candidate)" :stroke="diagnosticColor(candidate)" stroke-width="2" />
             <path v-if="inspected(candidate) && candidate.status === 'rejected'" d="M-3-3L3 3 M-3 3L3-3" fill="none" stroke="#b91c1c" stroke-width="2" />
           </g>
-          <text v-if="(candidate.key === inspectKey || stage === 4) && candidate.status === 'rejected'" class="projection-reason" x="13" y="-12">{{ candidate.reason }}</text>
+          <g v-if="candidate.key === inspectKey" transform="translate(0, -22)">
+            <rect x="-110" y="-22" width="220" height="26" rx="8" :fill="candidate.status === 'rejected' ? '#fef2f2' : '#ecfdf5'" :stroke="candidate.status === 'rejected' ? '#dc2626' : '#059669'" stroke-width="2" />
+            <text text-anchor="middle" y="-5" :fill="candidate.status === 'rejected' ? '#991b1b' : '#065f46'" font-size="12" font-weight="900">{{ candidate.status === 'rejected' ? `✕ 淘汰：${candidate.reason}` : `✓ ${candidate.reason}` }}</text>
+          </g>
+          <text v-else-if="stage === 4 && candidate.status === 'rejected'" class="projection-reason" x="13" y="-12">{{ candidate.reason }}</text>
         </g>
       </TransitionGroup>
       <g v-if="planner && stage === 4" class="map-candidates">

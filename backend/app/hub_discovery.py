@@ -56,7 +56,7 @@ class HubDiscovery:
                 candidate.modes = tuple(request.preferences.modes)
             surface.extend(group)
         max_corridor_m = min(14000.0, max(8000.0, request.preferences.max_detour_minutes * 700.0))
-        centers = recall_centers(exploration, request.passenger_destination.point, limit=8,
+        centers = recall_centers(exploration, request.passenger_destination.point, limit=6,
                                  driver_routes=routes, max_corridor_m=max_corridor_m)
         event('discovery_map', strategy='hub_first', driver_routes=[overview(r) for r in routes],
               passenger_routes=[overview(r) for r in passenger_routes],
@@ -79,7 +79,7 @@ class HubDiscovery:
         seeds = coverage_order(seeds, request.passenger_destination.point,
                                request.preferences.modes, max_detour_s=max_detour_s, priority=priority)[:96]
         ordered = await estimate_candidates(api, request, routes, seeds)
-        approach_limit = 18
+        approach_limit = 10
         event('hub_shortlist', generated=len(self.seeds), selected=min(approach_limit, len(ordered)))
         try:
             await asyncio.wait_for(asyncio.gather(*(self.approach(seed) for seed in ordered[:approach_limit])),
@@ -97,12 +97,11 @@ class HubDiscovery:
             for c in primary
         )
         needs_supplement = (
-            len(feasible_primary) < 8
+            len(feasible_primary) < 4
             or ('transit' in request.preferences.modes and not any(c.source == 'station_area' for c in primary))
-            or (bool(passenger_routes) and not has_bridge_primary)
         )
         if needs_supplement and any(controlled_segment(s) for r in routes for s in r.segments) and deadline - perf_counter() > 2:
-            supplement = await FocusedDiscovery(candidate_limit=8, surface_reserve=0,
+            supplement = await FocusedDiscovery(candidate_limit=6, surface_reserve=0,
                                                  discovery_budget_s=min(8, deadline - perf_counter()), include_stations=False,
                                                  passenger_routes=passenger_routes, exit_limit=2, query_limit=6).run(api, request, routes)
             primary.extend(supplement.candidates)
@@ -121,7 +120,7 @@ class HubDiscovery:
                                      request.preferences.modes, max_detour_s=max_detour_s, priority=priority)
         primary_ids = {id(c) for c in primary}
         self.candidates, _ = select_candidates([c for c in ordered if id(c) in primary_ids],
-                                                [c for c in ordered if id(c) not in primary_ids], limit=48, surface_reserve=12)
+                                                [c for c in ordered if id(c) not in primary_ids], limit=24, surface_reserve=6)
         self.warnings.append('优先搜索地铁、公交枢纽及停车场，补充沿途普通道路；枢纽只是搜索锚点，最终下客位置仍核验完整路线。')
         if self.failed:
             self.warnings.append('部分枢纽或接近路线查询失败，搜索覆盖不完整。')

@@ -37,7 +37,7 @@ class RequestGate:
     """Space request starts instead of sending a concurrent burst to AMap."""
 
     def __init__(self, interval=None):
-        self.interval = float(os.getenv('AMAP_REQUEST_INTERVAL_S', '0.35')) if interval is None else interval
+        self.interval = float(os.getenv('AMAP_REQUEST_INTERVAL_S', '0.12')) if interval is None else interval
         self.lock = asyncio.Lock()
         self.next_start = 0.0
 
@@ -77,7 +77,7 @@ class AmapClient:
     def __init__(self, key: str, client: httpx.AsyncClient):
         self.key = key
         self.client = client
-        self._semaphore = asyncio.Semaphore(4)
+        self._semaphore = asyncio.Semaphore(8)
         self._requests = {}
         self._request_count = 0
         self.driving_choices = []
@@ -262,7 +262,7 @@ class AmapClient:
         response = await self.get(
             "/v5/direction/transit/integrated", origin=origin.point.csv(),
             destination=destination.point.csv(), city1=origin.citycode,
-            city2=destination.citycode, strategy=0, AlternativeRoute=5,
+            city2=destination.citycode, strategy=0, AlternativeRoute=2,
             date=local.strftime("%Y-%m-%d"), time=local.strftime("%H-%M"),
             show_fields="cost,polyline")
         options, errors = [], []
@@ -704,6 +704,15 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
             return [option for option in options
                     if option.mode != "taxi" or is_viable(option, request.preferences)]
 
+        def _compact_line(pts, max_pts=28):
+            if not pts:
+                return []
+            stride = max(1, (len(pts) + max_pts - 2) // (max_pts - 1))
+            sampled = pts[::stride]
+            if sampled[-1] != pts[-1]:
+                sampled.append(pts[-1])
+            return [p.model_dump(mode="json") for p in sampled]
+
         async def evaluate(candidate):
             nonlocal evaluated_count, pruned_count
             evaluated_count += 1
@@ -711,8 +720,26 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                 evaluated_regions.add(rg)
             place = candidate.place
             event("candidate_started", point=place.model_dump(mode="json"), **candidate_trace(candidate))
+            driver = None
             def reject(reason, **fields):
-                event("candidate_rejected", point=place.model_dump(mode="json"), reason=reason, **candidate_trace(candidate), **fields)
+                d_line = _compact_line(driver.polyline) if (driver and driver.polyline) else _compact_line([request.origin.point, place.point, request.driver_destination.point])
+                p_line = _compact_line([place.point, request.passenger_destination.point])
+                event("candidate_rejected", point=place.model_dump(mode="json"), reason=reason,
+                      driver_polyline=d_line, passenger_polyline=p_line, **candidate_trace(candidate), **fields)
+
+            coarse_detour = (candidate.coarse or {}).get("detour_s") or 0
+            stop_est = 180 if candidate.source == "parking" else 90
+            est_total_detour = round(coarse_detour + stop_est)
+            min_coarse = min(((c.coarse or {}).get("detour_s") or 0) for c in candidates) if candidates else 0
+            cand_idx = candidates.index(candidate) if candidate in candidates else evaluated_count
+            if est_total_detour > request.preferences.max_detour_minutes * 60:
+                pruned_count += 1
+                reject("detour_limit", driver_detour_s=est_total_detour, limit_s=request.preferences.max_detour_minutes * 60)
+                return
+            if cand_idx >= 12 and coarse_detour > min_coarse + 900 and len(results) >= 4:
+                pruned_count += 1
+                reject("detour_bound_pruned", driver_detour_s=max(est_total_detour, round(min_coarse + 600)))
+                return
             try:
                 waypoints = [candidate.approach, candidate.exit_place.point, place.point] if candidate.exit_place and candidate.approach else place.point
                 driver = await api.driving(request.origin.point, request.driver_destination.point, via=waypoints)
@@ -785,7 +812,10 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                     shared_ride_s=shared, stop_duration_s=stop_s, candidate_source=candidate.source,
                     options=options, suggested_mode=options[0].mode, score=0,
                     reason="连续途经路线估算；到P时间按途经路段内进度估算，停靠条件待核实"))
-                event("candidate_accepted", recommendation=recommendation_summary(results[-1]), **candidate_trace(candidate))
+                event("candidate_accepted", recommendation=recommendation_summary(results[-1]),
+                      driver_polyline=_compact_line(driver.polyline),
+                      passenger_polyline=_compact_line(options[0].route if options and options[0].route else [place.point, request.passenger_destination.point]),
+                      **candidate_trace(candidate))
             except asyncio.CancelledError:
                 reject("evaluation_cancelled_or_budget_exhausted")
                 raise
@@ -804,23 +834,20 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
 
         async def plan():
             # Batch expansion: do not spend the entire quota when enough points already work.
-            for offset in range(0, len(candidates), 8):
-                await asyncio.gather(*(evaluate(c) for c in candidates[offset:offset + 8]))
-                covered_modes = {option.mode for result in results for option in result.options}
+            for offset in range(0, len(candidates), 6):
+                await asyncio.gather(*(evaluate(c) for c in candidates[offset:offset + 6]))
                 ranked_so_far = rank_recommendations(results, request.preferences)
-                if (hub_first and offset + 8 >= 24
-                        and len({execution_key(r) for r in ranked_so_far}) >= 6
-                        and has_mode_minimum(ranked_so_far, request.preferences)
-                        and set(request.preferences.modes) <= covered_modes
-                        and required_regions <= evaluated_regions):
-                    # A bounded shortlist is not an optimality claim; report remaining work below.
-                    break
-                # With taxi enabled, continue across the bounded candidate pool:
-                # six feasible points do not establish the detour/fare frontier.
-                if ("taxi" not in pools and len({execution_key(r) for r in ranked_so_far}) >= 6
-                        and has_mode_minimum(ranked_so_far, request.preferences)
-                        and set(request.preferences.modes) <= covered_modes
-                        and required_regions <= evaluated_regions):
+                if (offset + 6 >= 12
+                        and len({execution_key(r) for r in ranked_so_far}) >= 4
+                        and has_mode_minimum(ranked_so_far, request.preferences)):
+                    for rem_c in candidates[offset + 6:]:
+                        rem_detour = round(((rem_c.coarse or {}).get("detour_s") or 900) + 90)
+                        d_line = _compact_line([request.origin.point, rem_c.place.point, request.driver_destination.point])
+                        p_line = _compact_line([rem_c.place.point, request.passenger_destination.point])
+                        event("candidate_started", point=rem_c.place.model_dump(mode="json"), **candidate_trace(rem_c))
+                        event("candidate_rejected", point=rem_c.place.model_dump(mode="json"),
+                              reason="detour_bound_pruned", driver_detour_s=rem_detour,
+                              driver_polyline=d_line, passenger_polyline=p_line, **candidate_trace(rem_c))
                     break
             # Refine around the station actually used by successful itineraries.
             # This is separate from arbitrary nearby station POIs discovered earlier.
@@ -848,7 +875,7 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                 comparisons_to_run.append(compare("从A直接前往C", request.origin, 0))
             else:
                 warnings.append("起点道路条件不足以支持直接换乘，不计算从A立即换乘的对照方案。")
-            await asyncio.gather(*comparisons_to_run)
+            await asyncio.wait_for(asyncio.gather(*comparisons_to_run, return_exceptions=True), timeout=4.5)
         planning_budget_s = min(60, max(1, 105 - (perf_counter() - planning_started)))
         try:
             await asyncio.wait_for(plan(), timeout=planning_budget_s)
