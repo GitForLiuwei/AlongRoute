@@ -345,13 +345,10 @@
   .smart-planner *, .smart-planner *::before, .smart-planner *::after { animation: none !important; transition: none !important; }
 }
 
-.smart-map-caption { pointer-events: auto; }
-.smart-map-view { display: flex; gap: 4px; border: 1px solid #cbd5e1; border-radius: 9px; padding: 3px; background: #fff; }
-.smart-map-view button { border: 0; border-radius: 6px; padding: 7px 9px; background: white; color: #475569; font-size: 12px; font-weight: 800; }
-.smart-map-view button.active { background: #dbeafe; color: #1d4ed8; }
+.smart-map-caption { pointer-events: auto; background: #fffffff5; border: 1px solid #cbd5e1; border-radius: 10px; padding: 8px 12px; }
+.smart-basemap-label { white-space: nowrap; }
 .smart-replay-note { flex-basis: 100%; color: #475569; font-size: 12px; font-weight: 600; }
-.smart-projection-label { color: #475569 !important; }
-@media (max-width: 480px) { .smart-map-view button, .smart-replay-note { font-size: 10px; } }
+@media (max-width: 480px) { .smart-replay-note { font-size: 10px; } }
 
 .smart-screening-banner { padding: 17px; border: 2px solid #bfdbfe; border-radius: 16px; background: #eff6ff; color: #1e3a8a; }
 .smart-screening-banner strong { font-size: 15px; line-height: 1.8; }
@@ -369,4 +366,4 @@
 .smart-screening-list .removed b { color: #b91c1c; background: #fee2e2; }
 .smart-screening-list .inspecting b { color: #92400e; background: #fef3c7; }
 .smart-ghost-toggle { display: flex; align-items: center; gap: 5px; padding: 8px 10px; border-radius: 9px; border: 1px solid #fda4af; background: #fff1f2; color: #9f1239; font-weight: 800; font-size: 12px; }
-@media(max-width:480px) { .smart-ghost-toggle { font-size: 10px; } .smart-projection-label { display: none; } }
+@media(max-width:480px) { .smart-ghost-toggle { font-size: 10px; } }

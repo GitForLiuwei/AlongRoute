@@ -7,6 +7,7 @@ from .search_log import event, recommendation_summary
 
 MAX_RECOMMENDATIONS = 6
 MAX_BOARDING_WALK_M = 300
+SOFT_MAX_BOARDING_WALK_M = 480
 TAXI_SECONDS_PER_YUAN = Decimal(108)
 
 # 三档打车偏好权重: (司机绕行秒权重 w_driver, 乘客全程秒权重 w_pax, 每1元折合秒数 sec_per_yuan)
@@ -36,7 +37,7 @@ def is_viable(option: ModeOption, prefs: Preferences) -> bool:
     if option.mode == "transit":
         return (option.boarding_stop is not None
                 and option.boarding_walk_m is not None
-                and option.boarding_walk_m <= MAX_BOARDING_WALK_M
+                and option.boarding_walk_m <= SOFT_MAX_BOARDING_WALK_M
                 and option.walking_m is not None and option.walking_m <= prefs.max_walking_m
                 and option.transfers is not None and option.transfers <= prefs.max_transfers)
     return (option.fare_yuan is not None and math.isfinite(option.fare_yuan)
@@ -56,6 +57,9 @@ def _subway_bonus_minutes(option: ModeOption, priority: str) -> float:
 
 def option_score(option: ModeOption, priority: str) -> float:
     time_min = (option.total_duration_s if option.total_duration_s is not None else option.duration_s) / 60
+    if option.mode == "transit" and not option.direct_walk:
+        extra_walk_m = max(0, (option.boarding_walk_m or 0) - MAX_BOARDING_WALK_M)
+        time_min += extra_walk_m / 1.25 * 2.5 / 60
     # 费用未知不能当作零：增加保守惩罚，并在界面显示“待估算”。
     fee_min = option.fare_yuan if option.fare_yuan is not None else 10000
     walking = (option.walking_m or 0) / 1000
@@ -101,8 +105,11 @@ def _is_redundant_taxi_cluster(rec: Recommendation, ex: Recommendation) -> bool:
                     and rec.options[0].total_duration_s == ex.options[0].total_duration_s
                     and rec.options[0].fare_yuan == ex.options[0].fare_yuan)
     # Proximity alone cannot erase a driver/passenger/fare tradeoff.
+    distinct_lines = (bool(rec.station_lines) and bool(ex.station_lines)
+                      and set(rec.station_lines) != set(ex.station_lines))
     return same_metrics and (dist_m <= 300 or (
-        bool(rec.dropoff_road) and rec.dropoff_road == ex.dropoff_road and dist_m <= 2500))
+        bool(rec.dropoff_road) and rec.dropoff_road == ex.dropoff_road and dist_m <= 2500
+        and not distinct_lines))
 
 
 def _is_severe_overshoot_outlier(rec: Recommendation, best: Recommendation) -> bool:
@@ -182,6 +189,7 @@ def _assign_recommendation_labels(selected: list[Recommendation], prefs: Prefere
 def rank_taxi_recommendations(recs: list[Recommendation], prefs: Preferences) -> list[Recommendation]:
     """Rank feasible trips by priority-weighted driver delay + passenger full trip + taxi fare."""
     candidates = []
+    transit_prefs = prefs.model_copy(update={"modes": ["transit"]})
     for original in recs:
         if not 0 <= original.driver_detour_s <= prefs.max_detour_minutes * 60:
             event("taxi_filtered", candidate_id=original.id, reason="detour_limit",
@@ -209,6 +217,15 @@ def rank_taxi_recommendations(recs: list[Recommendation], prefs: Preferences) ->
                                                 item.total_duration_s, item.fare_yuan))
 
         rec = original.model_copy(deep=True)
+        # Keep verified line identity before reducing a mixed candidate to its taxi card.
+        station_lines = set(original.station_lines)
+        for item in original.options:
+            if item.mode != "transit" or not is_viable(item, transit_prefs):
+                continue
+            first_vehicle = next((step for step in item.transit_steps if step.kind != "walk"), None)
+            if item.boarding_kind == "subway" and first_vehicle and first_vehicle.kind == "subway" and first_vehicle.line_name:
+                station_lines.add(first_vehicle.line_name)
+        rec.station_lines = sorted(station_lines)
         rec.options = [option]
         rec.suggested_mode = "taxi"
         candidates.append(rec)
@@ -398,7 +415,7 @@ def _rank_transit_recommendations(recs: list[Recommendation], prefs: Preferences
         ordered = sorted((r for r in viable_recs if r.id not in dominated), key=lambda r: (
             preferred_option(r.options, prefs.priority).fare_yuan
             if preferred_option(r.options, prefs.priority).fare_yuan is not None else 1e9,
-            preferred_option(r.options, prefs.priority).total_duration_s, r.driver_detour_s))
+            r.score, preferred_option(r.options, prefs.priority).total_duration_s, r.driver_detour_s))
     else:
         ordered = sorted((r for r in viable_recs if r.id not in dominated), key=lambda r: (r.score, r.driver_detour_s))
     # Within two score-minutes / two actual minutes at the same fare, prioritize

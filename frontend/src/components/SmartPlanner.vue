@@ -4,8 +4,8 @@ import { ArrowRight, Check, CheckCircle2, ChevronRight, Compass, Copy, Layers3,
   LoaderCircle, MapPin, Navigation, RefreshCcw, Route, Share2, ShieldAlert,
   SlidersHorizontal, Sparkles, TrainFront, CarFront, Eye, EyeOff, X } from 'lucide-vue-next'
 import MapCanvas from './MapCanvas.vue'
-import { projectionCandidates, type CandidateReplayResponse, type ProjectionCandidate } from '../lib/candidateProjection'
-import { apiGet, detourDuration, distance, duration, fare, type Mode, type Place,
+import { projectionCandidates, type CandidateEvent, type CandidateReplayResponse, type ProjectionCandidate } from '../lib/candidateProjection'
+import { apiGet, getLatestSearchId, detourDuration, distance, duration, fare, type Mode, type Place,
   type Recommendation, type RecommendationRequest, type RecommendationResponse } from '../lib/api'
 
 const props = defineProps<{
@@ -23,17 +23,19 @@ const visibleCandidateCount = ref(Infinity)
 const inspectIndex = ref(-1)
 const removedKeys = ref<string[]>([])
 const showRemovedGhost = ref(false)
+const streamedLive = ref(false)
+const liveInspectKey = ref('')
 let replayTimers: ReturnType<typeof setTimeout>[] = []
 function stopReplay() {
   replayTimers.forEach(clearTimeout)
   replayTimers = []
   replayStage.value = 0
   inspectIndex.value = -1
+  liveInspectKey.value = ''
   visibleCandidateCount.value = Infinity
 }
 function replay() {
   stopReplay()
-  projectedView.value = true
   showRemovedGhost.value = false
   removedKeys.value = []
   visibleCandidateCount.value = 0
@@ -57,11 +59,11 @@ function replay() {
   later(stopReplay, finish + 900)
 }
 
-const stage = computed(() => props.loading ? (props.elapsed < 3 ? 1 : props.elapsed < 8 ? 2 : 3)
+const stage = computed(() => props.loading ? replayStage.value || 1
   : props.result && !props.stale && !props.expired ? replayStage.value || 4 : 0)
 const stages = ['选主干道', '沿途选点', '路网核验', '推荐锁定']
 const status = computed(() => replayStage.value === 3 && inspectingCandidate.value
-  ? `第 3 步：回放「${inspectingCandidate.value.name}」核验结果…`
+  ? `第 3 步：${props.loading ? '正在核验' : '回放'}「${inspectingCandidate.value.name}」${props.loading ? '' : '核验结果'}…`
   : replayStage.value === 2 ? `第 2 步：已展示 ${Math.min(visibleCandidateCount.value, screeningCandidates.value.length)} 条候选记录…`
   : props.loading || (replayStage.value > 0 && replayStage.value < 4)
   ? ['第 1 步：正在锁定司机主干路线…', '第 2 步：正在沿途扫描候选停靠点…', '第 3 步：正在核验路网与接驳方案…'][stage.value - 1]
@@ -87,22 +89,23 @@ const shareText = computed(() => {
   const navigation = navigationUrl(r)
   return `【顺路达 · 顺路下车建议】\n师傅您好！建议在「${r.point.name}」下车。\n🚗 您的行程增加约 ${detourDuration(r.driver_detour_s)}（含停靠），全程约 ${duration(r.driver_route.duration_s + r.stop_duration_s)}。\n${o?.direct_walk ? '🚶 我下车后直接步行' : o?.mode === 'taxi' ? '🚕 我下车后打车' : '🚇 我下车后乘公交 / 地铁'}，接驳约 ${duration(o?.duration_s ?? 0)}，费用 ${fare(o?.fare_yuan ?? null)}。\n📍 位置：${r.point.point.lon}, ${r.point.point.lat}\n停靠条件待核实，咱们确认可以临停后再下车，您看方便吗？\n司机高德导航：${navigation}`
 })
-const projectedView = ref(true)
 const candidateReplay = ref<CandidateReplayResponse | null>(null)
 const replayLoading = ref(false)
-const diagnosticCandidates = computed(() => projectionCandidates(candidateReplay.value?.events || [], props.result?.recommendations || []))
+const diagnosticCandidates = computed(() => projectionCandidates(candidateReplay.value?.events || [], shownResult.value?.recommendations || []))
 const screeningCandidates = computed<ProjectionCandidate[]>(() => {
-  const candidates = diagnosticCandidates.value.filter(c => c.status !== 'pending')
+  const candidates = diagnosticCandidates.value.filter(c => props.loading || c.status !== 'pending')
   const ids = new Set(candidates.map(c => c.recommendationId).filter(Boolean))
-  for (const r of props.result?.recommendations || []) if (!ids.has(r.id)) {
+  for (const r of shownResult.value?.recommendations || []) if (!ids.has(r.id)) {
     ids.add(r.id)
     candidates.push({ key: `final:${r.id}`, name: r.point.name, point: r.point.point,
       status: 'recommended', reason: '最终推荐方案', recommendationId: r.id })
   }
   return candidates
 })
-const isReplaying = computed(() => replayStage.value > 0 && replayStage.value < 4)
-const inspectingCandidate = computed(() => screeningCandidates.value[inspectIndex.value] || null)
+const isReplaying = computed(() => !props.loading && replayStage.value > 0 && replayStage.value < 4)
+const inspectingCandidate = computed(() => props.loading
+  ? screeningCandidates.value.find(c => c.key === liveInspectKey.value) || null
+  : screeningCandidates.value[inspectIndex.value] || null)
 const visibleScreening = computed(() => screeningCandidates.value.slice(0, visibleCandidateCount.value))
 function screeningState(candidate: ProjectionCandidate, index: number) {
   if (removedKeys.value.includes(candidate.key)) return '已移除'
@@ -145,20 +148,78 @@ watch(() => [props.loading, props.result, props.stale, props.expired], () => {
   if (!usable.value) shareDialog.value?.close()
 })
 watch(() => [props.result, props.loading, props.stale, props.expired] as const, async (_, __, onCleanup) => {
-  candidateReplay.value = null
   replayLoading.value = false
-  const result = props.result
-  const id = result?.search_id
-  if (!result || props.loading || props.stale || props.expired || result.mode !== 'live' || !id || !/^[a-f0-9]{32}$/.test(id)) return
   const controller = new AbortController()
   let current = true
-  onCleanup(() => { current = false; controller.abort() })
+  let eventSource: EventSource | null = null
+  onCleanup(() => {
+    current = false
+    controller.abort()
+    eventSource?.close()
+  })
+  if (props.loading) {
+    stopReplay()
+    candidateReplay.value = null
+    streamedLive.value = false
+    removedKeys.value = []
+    showRemovedGhost.value = false
+    replayStage.value = 1
+    const liveId = getLatestSearchId()
+    if (props.mode !== 'live' || !/^[a-f0-9]{32}$/.test(liveId)) return
+    candidateReplay.value = { search_id: liveId, finished: false, events: [] }
+    if (typeof EventSource === 'undefined') return
+    const seen = new Set<number>()
+    eventSource = new EventSource(`/api/search-replay/${liveId}/stream`)
+    eventSource.onmessage = message => {
+      if (!current || !props.loading) return
+      let event: CandidateEvent
+      try { event = JSON.parse(message.data) } catch { return }
+      if (!event || typeof event.event !== 'string') return
+      if (typeof event.sequence === 'number') {
+        if (seen.has(event.sequence)) return
+        seen.add(event.sequence)
+      }
+      const replay = candidateReplay.value
+      if (!replay || replay.search_id !== liveId) return
+      replay.events.push(event)
+      replay.finished = event.event === 'search_finished' || replay.finished
+      streamedLive.value = true
+      if (event.event === 'candidate_generated' || event.event === 'candidate_coarse') {
+        replayStage.value = Math.max(2, replayStage.value)
+      } else if (['candidate_started', 'candidate_accepted', 'candidate_rejected'].includes(event.event)) {
+        replayStage.value = 3
+        if (!Array.isArray(event.candidate_key)) return
+        const candidateKey = JSON.stringify(event.candidate_key)
+        liveInspectKey.value = candidateKey
+        if (event.event === 'candidate_rejected') {
+          replayTimers.push(setTimeout(() => {
+            if (!current) return
+            if (!removedKeys.value.includes(candidateKey)) removedKeys.value.push(candidateKey)
+            if (liveInspectKey.value === candidateKey) liveInspectKey.value = ''
+          }, 260))
+        }
+      }
+    }
+    eventSource.addEventListener('done', () => eventSource?.close())
+    // The full replay is still fetched after POST completes if streaming fails.
+    eventSource.onerror = () => eventSource?.close()
+    return
+  }
+  const result = props.result
+  const id = result?.search_id
+  if (!result || props.stale || props.expired || result.mode !== 'live' || !id || !/^[a-f0-9]{32}$/.test(id)) {
+    candidateReplay.value = null
+    return
+  }
+  // POST completion always unlocks results immediately, even if SSE was unavailable.
+  // The replay button remains available once the complete log has loaded.
+  replayStage.value = 4
+  if (candidateReplay.value?.search_id !== id) candidateReplay.value = null
   replayLoading.value = true
   try {
     const data = await apiGet<CandidateReplayResponse>(`/api/search-replay/${id}`, controller.signal)
     if (!current || data.search_id !== id || !Array.isArray(data.events)) return
     candidateReplay.value = data
-    if (data.events.length) { projectedView.value = true; replay() }
   } catch { /* The recommendation remains usable when its optional replay is unavailable. */ }
   finally { if (current) replayLoading.value = false }
 }, { immediate: true })
@@ -170,7 +231,7 @@ onBeforeUnmount(() => { stopReplay(); clearTimeout(copyTimer) })
     <header class="smart-header">
       <a class="smart-brand" href="/user" aria-label="顺路达首页">
         <span class="smart-logo"><Compass :size="29" :stroke-width="2.5" /></span>
-        <span><strong>顺路达 <b>AlongRoute</b><em>经纬度投影 · 动态筛点</em></strong><small>司机少绕一点路 · 乘客轻松到家</small></span>
+        <span><strong>顺路达 <b>AlongRoute</b><em>高德底图 · 实时筛点</em></strong><small>司机少绕一点路 · 乘客轻松到家</small></span>
       </a>
       <div class="smart-header-end"><span class="smart-mode" :class="{ demo: mode === 'demo' }"><i />{{ mode === 'live' ? '真实路线' : '演示模式' }}</span><slot name="navigation" /></div>
     </header>
@@ -192,7 +253,7 @@ onBeforeUnmount(() => { stopReplay(); clearTimeout(copyTimer) })
           <p v-if="error" class="smart-error" role="alert">{{ error }}</p>
           <div v-if="loading" class="smart-progress" role="status">
             <div class="smart-progress-icon"><Navigation :size="25" class="spinning" /></div>
-            <strong>{{ status }}</strong><p>阶段为估计，结果以接口返回为准</p>
+            <strong>{{ status }}</strong><p>{{ streamedLive ? '正在同步候选发现与路网核验进度' : '正在等待规划进度，结果以接口返回为准' }}</p>
             <div class="smart-progress-track"><i :style="{ width: `${stage / 4 * 100}%` }" /></div>
             <div class="smart-progress-bottom"><span>已用时 {{ elapsed.toFixed(1) }} 秒</span><button @click="emit('cancel')">取消计算</button></div>
           </div>
@@ -226,15 +287,15 @@ onBeforeUnmount(() => { stopReplay(); clearTimeout(copyTimer) })
       </aside>
 
       <section class="smart-map-panel" aria-label="路线可视化">
-        <MapCanvas theme="bright" :projected="projectedView" :candidates="screeningCandidates" :visible-candidate-count="visibleCandidateCount" :inspect-key="inspectingCandidate?.key" :removed-keys="removedKeys" :show-removed="showRemovedGhost" :search-stage="stage || (shownResult ? 4 : 0)" :result="shownResult" :active="shownActive"
+        <MapCanvas theme="bright" :candidates="screeningCandidates" :visible-candidate-count="visibleCandidateCount" :inspect-key="inspectingCandidate?.key" :removed-keys="removedKeys" :show-removed="showRemovedGhost" :search-stage="stage || (shownResult ? 4 : 0)" :result="shownResult" :active="shownActive"
           :origin="shownResult && snapshot ? snapshot.origin : origin" :driver-destination="shownResult && snapshot ? snapshot.driver_destination : driverDestination"
           :passenger-destination="shownResult && snapshot ? snapshot.passenger_destination : passengerDestination"
           :shown-mode="shownMode" :proxy-ready="proxyReady" @pick="emit('pick', $event)" />
         <div class="smart-map-top">
-          <div class="smart-map-status" role="status"><span class="smart-status-dot" :class="{ pulse: loading }" /><span>{{ status }}</span><small v-if="replayStage">结果动画回放</small></div>
+          <div class="smart-map-status" role="status"><span class="smart-status-dot" :class="{ pulse: loading }" /><span>{{ status }}</span><small v-if="loading && streamedLive">实时找点</small><small v-else-if="isReplaying">结果动画回放</small></div>
           <ol class="smart-stages" aria-label="规划阶段"><li v-for="(name, index) in stages" :key="name" :class="{ current: stage === index + 1, complete: stage > index + 1 }"><Check v-if="stage > index + 1" :size="11" /><span v-else>{{ index + 1 }}.</span>{{ name }}<ChevronRight v-if="index < 3" class="stage-arrow" :size="12" /></li></ol>
         </div>
-        <div class="smart-map-caption"><div class="smart-map-view" role="group" aria-label="地图显示方式"><button :class="{ active: projectedView }" :aria-pressed="projectedView" @click="projectedView = true">经纬度示意</button><button v-if="proxyReady" :class="{ active: !projectedView }" :aria-pressed="!projectedView" @click="projectedView = false">高德底图</button></div><span v-if="projectedView" class="smart-projection-label">经纬度等比例投影</span><Layers3 :size="13" />{{ result?.mode === 'live' ? '路线来自规划接口 · 停靠条件待核实' : '行程路线示意 · 非真实导航' }}<span v-if="result">{{ distance(result.baseline_route.distance_m) }} 司机原路线</span><button v-if="stage === 4 && rejectedCount" class="smart-ghost-toggle" :aria-pressed="showRemovedGhost" @click="showRemovedGhost = !showRemovedGhost"><EyeOff v-if="showRemovedGhost" :size="14" /><Eye v-else :size="14" />{{ showRemovedGhost ? '隐藏已移除点' : `查看已移除点 (${rejectedCount})` }}</button><small v-if="replayNote" class="smart-replay-note">{{ replayNote }}</small></div>
+        <div class="smart-map-caption"><span class="smart-basemap-label">高德底图</span><Layers3 :size="13" />{{ mode === 'live' ? '路线来自规划接口 · 停靠条件待核实' : '演示路线 · 非真实导航' }}<span v-if="result">{{ distance(result.baseline_route.distance_m) }} 司机原路线</span><button v-if="stage === 4 && rejectedCount" class="smart-ghost-toggle" :aria-pressed="showRemovedGhost" @click="showRemovedGhost = !showRemovedGhost"><EyeOff v-if="showRemovedGhost" :size="14" /><Eye v-else :size="14" />{{ showRemovedGhost ? '隐藏已移除点' : `查看已移除点 (${rejectedCount})` }}</button><small v-if="replayNote" class="smart-replay-note">{{ replayNote }}</small></div>
         <div v-if="active && !loading" class="smart-selected-bar">
           <div class="smart-selected-icon"><MapPin :size="20" /></div><div class="smart-selected-text"><small>当前选择 · {{ modeName(active) }}</small><strong>{{ active.point.name }}</strong></div>
           <button class="smart-detail-button" :aria-expanded="detailsOpen" @click="detailsOpen = !detailsOpen">{{ detailsOpen ? '收起详情' : '路线详情' }}<ChevronRight :size="14" /></button>

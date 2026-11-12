@@ -276,7 +276,7 @@ onMounted(async () => {
           <div class="range-ends"><span>0 元</span><span>200 元</span></div>
           <p v-if="isDebug" class="transit-rule">{{ manualMode ? '测试模式会展示超出预算的测算结果，并标明是否在预算内。' : '仅推荐预估打车费不超过此金额的方案；费用未知时不推荐打车。' }}</p>
         </div>
-        <p v-if="isDebug && !manualMode && selectedModes.includes('transit')" class="transit-rule"><BusFront :size="14" /> 仅公交 / 地铁方案要求到实际站台或入口步行≤300米，并尽量送近；打车不受此限制。</p>
+        <p v-if="isDebug && !manualMode && selectedModes.includes('transit')" class="transit-rule"><BusFront :size="14" /> 公交 / 地铁优先到站步行≤300米，最多480米；超出300米增加评分惩罚，打车不受此限制。</p>
         <label v-if="!manualMode" class="form-label">推荐偏好</label>
         <div v-if="!manualMode" class="priority-tabs">
           <button :class="{ active: priority === 'balanced' }" @click="priority = 'balanced'">均衡推荐</button>
@@ -315,7 +315,7 @@ onMounted(async () => {
                 <span class="mode-description">{{ o.direct_walk ? `步行 ${o.walking_m} 米，无需接车或换乘` : o.mode === 'taxi' ? '含假设5分钟接车缓冲，实际等待和上车位置待确认' : `到站步行 ${o.boarding_walk_m} 米 · 全程步行 ${o.walking_m} 米 · 换乘 ${o.transfers} 次` }}</span>
               </button>
             </div>
-            <div v-if="activeOption?.mode === 'transit' && activeOption.boarding_stop" class="boarding-summary"><BusFront :size="17" /><div><strong>{{ activeOption.boarding_stop.name }}</strong><p>沿步行路线 {{ activeOption.boarding_walk_m }} 米到达{{ activeOption.boarding_kind === 'subway' ? '地铁入口' : '公交站台' }}，符合300米限制；同等条件优先更靠近站点的下客位置。</p></div></div>
+            <div v-if="activeOption?.mode === 'transit' && activeOption.boarding_stop" class="boarding-summary"><BusFront :size="17" /><div><strong>{{ activeOption.boarding_stop.name }}</strong><p>沿步行路线 {{ activeOption.boarding_walk_m }} 米到达{{ activeOption.boarding_kind === 'subway' ? '地铁入口' : '公交站台' }}；{{ (activeOption.boarding_walk_m || 0) > 300 ? '超过300米，已增加步行评分惩罚（上限480米）' : '符合300米优先范围' }}，同等条件优先更靠近站点的下客位置。</p></div></div>
             <details v-if="activeOption?.mode === 'transit' && !activeOption.direct_walk" class="onward-details" :open="isDebug"><summary>查看公交 / 地铁乘坐步骤</summary><TransitItinerary :option="activeOption" /></details>
             <div v-if="activeOption" class="option-note"><Info :size="15" /><span>{{ activeOption.details }}。{{ activeOption.notes.join('；') }}。</span></div>
             <div class="detail-actions">
@@ -382,7 +382,7 @@ onMounted(async () => {
           <div class="range-ends"><span>0 元</span><span>200 元</span></div>
           <p v-if="isDebug" class="transit-rule">{{ manualMode ? '测试模式会展示超出预算的测算结果，并标明是否在预算内。' : '仅推荐预估打车费不超过此金额的方案；费用未知时不推荐打车。' }}</p>
         </div>
-        <p v-if="isDebug && !manualMode && selectedModes.includes('transit')" class="transit-rule"><BusFront :size="14" /> 仅公交 / 地铁方案要求到实际站台或入口步行≤300米，并尽量送近；打车不受此限制。</p>
+        <p v-if="isDebug && !manualMode && selectedModes.includes('transit')" class="transit-rule"><BusFront :size="14" /> 公交 / 地铁优先到站步行≤300米，最多480米；超出300米增加评分惩罚，打车不受此限制。</p>
         <label v-if="!manualMode" class="form-label">推荐偏好</label>
         <div v-if="!manualMode" class="priority-tabs">
           <button :class="{ active: priority === 'balanced' }" @click="priority = 'balanced'">均衡推荐</button>
@@ -439,7 +439,7 @@ onMounted(async () => {
           <p v-if="isDebug && result?.search_id" class="journey-summary">搜索编号：{{ result.search_id }} · 用于查询本地搜索日志</p>
           <div v-if="error" class="notice error-notice"><CircleAlert :size="18" /> {{ error }}</div>
           <div v-if="!result && !error" class="empty-state"><MapPin :size="26"/><strong>填写行程，开始智能规划</strong><p>先比较司机绕路成本，再计算乘客后续交通方案。</p></div>
-          <div v-else-if="result && !result.recommendations.length" class="empty-state"><BadgeHelp :size="28"/><strong>暂无符合条件的候选点</strong><p>请先检查搜索是否完成及服务状态，再考虑调整行程；仅公交 / 地铁方案的到站步行上限为300米。</p></div>
+          <div v-else-if="result && !result.recommendations.length" class="empty-state"><BadgeHelp :size="28"/><strong>暂无符合条件的候选点</strong><p>请先检查搜索是否完成及服务状态，再考虑调整行程；公交 / 地铁的到站步行上限为480米，优先选择300米以内方案。</p></div>
 
           <CandidateReplay v-if="isDebug" :search-id="result?.search_id" />
 
@@ -482,7 +482,7 @@ onMounted(async () => {
                 <span class="mode-description">{{ o.direct_walk ? `步行 ${o.walking_m} 米，无需接车或换乘` : o.mode === 'taxi' ? '含假设5分钟接车缓冲，实际等待和上车位置待确认' : `到站步行 ${o.boarding_walk_m} 米 · 全程步行 ${o.walking_m} 米 · 换乘 ${o.transfers} 次` }}</span>
               </button>
             </div>
-            <div v-if="activeOption?.mode === 'transit' && activeOption.boarding_stop" class="boarding-summary"><BusFront :size="17" /><div><strong>{{ activeOption.boarding_stop.name }}</strong><p>沿步行路线 {{ activeOption.boarding_walk_m }} 米到达{{ activeOption.boarding_kind === 'subway' ? '地铁入口' : '公交站台' }}，符合300米限制；同等条件优先更靠近站点的下客位置。</p></div></div>
+            <div v-if="activeOption?.mode === 'transit' && activeOption.boarding_stop" class="boarding-summary"><BusFront :size="17" /><div><strong>{{ activeOption.boarding_stop.name }}</strong><p>沿步行路线 {{ activeOption.boarding_walk_m }} 米到达{{ activeOption.boarding_kind === 'subway' ? '地铁入口' : '公交站台' }}；{{ (activeOption.boarding_walk_m || 0) > 300 ? '超过300米，已增加步行评分惩罚（上限480米）' : '符合300米优先范围' }}，同等条件优先更靠近站点的下客位置。</p></div></div>
             <details v-if="activeOption?.mode === 'transit' && !activeOption.direct_walk" class="onward-details" :open="isDebug"><summary>查看公交 / 地铁乘坐步骤</summary><TransitItinerary :option="activeOption" /></details>
             <div v-if="activeOption" class="option-note"><Info :size="15" /><span>{{ activeOption.details }}。{{ activeOption.notes.join('；') }}。</span></div>
             <div class="detail-actions">

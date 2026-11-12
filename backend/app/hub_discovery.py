@@ -33,6 +33,7 @@ class HubDiscovery:
     async def run(self, api, request, routes):
         from .amap import MapServiceError
         self.api, self.request = api, request
+        length_cache = {}
         deadline = perf_counter() + self.budget_s
         passenger_routes = []
         try:
@@ -73,7 +74,8 @@ class HubDiscovery:
             self.warnings.append('枢纽搜索达到时间预算，保留已取得的站点和普通道路。')
         seeds = sorted(self.seeds.values(), key=lambda c: (c.region, c.hub_kind, c.place.point.csv()))
         for seed in seeds:
-            seed.coarse = geometry_estimate(seed, routes, request.passenger_destination.point)
+            seed.coarse = geometry_estimate(seed, routes, request.passenger_destination.point,
+                                            length_cache=length_cache)
         max_detour_s = request.preferences.max_detour_minutes * 60
         priority = getattr(request.preferences, 'priority', 'balanced') or 'balanced'
         seeds = coverage_order(seeds, request.passenger_destination.point,
@@ -88,7 +90,8 @@ class HubDiscovery:
             self.warnings.append('部分枢纽的下客道路尚未完成核验，保留已生成候选。')
         primary = sorted(self.approached, key=lambda c: (c.region, c.hub_kind, c.place.point.csv()))
         for c in primary:
-            c.coarse = geometry_estimate(c, routes, request.passenger_destination.point)
+            c.coarse = geometry_estimate(c, routes, request.passenger_destination.point,
+                                         length_cache=length_cache)
         soft_detour_bound_s = max(1200.0, min(2400.0, max_detour_s * 2.0))
         feasible_primary = [c for c in primary if (c.coarse.get('detour_s') or 0) <= soft_detour_bound_s]
         has_bridge_primary = any(
@@ -111,7 +114,8 @@ class HubDiscovery:
         if self.failed and not self.succeeded and not primary and not surface:
             raise MapServiceError('枢纽及接驳地点查询失败，请稍后重试')
         for c in [*primary, *surface]:
-            c.coarse = geometry_estimate(c, routes, request.passenger_destination.point)
+            c.coarse = geometry_estimate(c, routes, request.passenger_destination.point,
+                                         length_cache=length_cache)
         try:
             ordered = await asyncio.wait_for(estimate_candidates(api, request, routes, [*primary, *surface]),
                                              timeout=max(.01, min(6.0, deadline - perf_counter())))

@@ -39,7 +39,7 @@ def test_taxi_is_not_subject_to_station_or_walking_limits():
 
 def test_mixed_modes_keep_taxi_when_transit_access_fails():
     candidate = rec("both", option("taxi"))
-    candidate.options.append(option(access=301))
+    candidate.options.append(option(access=481))
     ranked = rank_recommendations([candidate], Preferences(modes=["taxi", "transit"]))
     assert [item.mode for item in ranked[0].options] == ["taxi"]
 
@@ -173,17 +173,17 @@ def test_highway_to_highway_interchange_is_not_an_original_exit():
 
 
 @pytest.mark.parametrize("urban_road", ["城市快速路", "城市高架路"])
-def test_motorway_to_urban_expressway_records_anchor_without_allowing_dropoff(urban_road):
+def test_motorway_to_urban_expressway_waits_for_actual_surface_exit(urban_road):
     route = Route(duration_s=600, distance_m=10000, polyline=[A, E, B, P], segments=[
         RoadSegment(name="G4高速", polyline=[A, E]),
         RoadSegment(name=urban_road, polyline=[E, B]),
         RoadSegment(name="人民路", polyline=[B, P])])
     anchors = original_exits(route, citycode="020")
-    assert [anchor.place.point for anchor in anchors] == [E, B]
+    assert [anchor.place.point for anchor in anchors] == [B]
     transition = anchors[0]
     assert transition.original and transition.place.citycode == "020"
-    assert haversine_m(transition.approach, E) == pytest.approx(300, abs=1)
-    assert transition.progress_m == pytest.approx(project_to_path(E, route.polyline)[1])
+    assert haversine_m(transition.approach, B) == pytest.approx(300, abs=1)
+    assert transition.progress_m == pytest.approx(project_to_path(B, route.polyline)[1])
     request = RecommendationRequest(origin=Place(name="A", point=A),
         driver_destination=Place(name="B", point=P), passenger_destination=Place(name="C", point=P))
     candidates = build_candidates(route, [], [], request)

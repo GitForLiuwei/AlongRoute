@@ -240,7 +240,7 @@ def test_separate_transit_card_uses_preferred_option_and_respects_hard_limits():
     result = rank_recommendations([rec], Preferences())
     assert len(result) == 2
     assert result[1].options[0].boarding_kind == "subway"
-    fast.boarding_walk_m = slow.boarding_walk_m = 301
+    fast.boarding_walk_m = slow.boarding_walk_m = 481
     result = rank_recommendations([rec], Preferences())
     assert len(result) == 1 and result[0].suggested_mode == "taxi"
 

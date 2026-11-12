@@ -138,6 +138,7 @@ class Recommendation(BaseModel):
     dropoff_road: str | None = None
     highway_exit: Place | None = None
     original_exit: bool = False
+    station_lines: list[str] = Field(default_factory=list, exclude=True)
 
 
 class ComparisonOption(BaseModel):
@@ -153,7 +154,7 @@ class RecommendationResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     generated_at: datetime
     examined_candidates: int = 0
-    station_walk_limit_m: Literal[300] = 300
+    station_walk_limit_m: Literal[480] = 480
     comparisons: list[ComparisonOption] = Field(default_factory=list)
     search_complete: bool = False
     departure_at: datetime | None = None

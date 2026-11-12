@@ -1,5 +1,7 @@
 """Search driver and passenger corridors, then verify every complete driver trip."""
 import asyncio
+import math
+import re
 from bisect import bisect_right
 from dataclasses import dataclass, field
 
@@ -42,7 +44,7 @@ def exits_around_q(anchors, progress):
 
 
 class RouteIndex:
-    """Index distances once; compare a prefix without searching later crossings."""
+    """Index distances once for corridor and short braid comparisons."""
     def __init__(self, route):
         self.route = route
         self.points = []
@@ -71,26 +73,62 @@ class RouteIndex:
         return self.roads[index]
 
 
+def _norm_road_name(name):
+    cleaned = re.sub(r"^[GSXCY]\d+[A-Z]?\s*", "", (name or "").strip(), flags=re.IGNORECASE)
+    suffixes = ("主路", "辅路", "高架", "快速路", "高速公路", "高速", "大道", "路", "街")
+    while True:
+        suffix = next((s for s in suffixes if cleaned.endswith(s) and len(cleaned) > len(s) + 1), None)
+        if suffix is None:
+            return cleaned
+        cleaned = cleaned[:-len(suffix)]
+
+
 def common_prefix_end(driver, passenger):
-    """Require continuous matching geometry, road names, and road level from E."""
+    """Find corridor divergence, tolerating aliases and short rejoining braids."""
     left, right = RouteIndex(driver), RouteIndex(passenger)
     if min(len(left.points), len(right.points)) < 2:
         return None
     maximum = min(left.length, right.length)
 
+    def heading(index, distance):
+        start = index.point(max(0, distance - 10))
+        end = index.point(min(index.length, distance + 10))
+        return ((end.lon - start.lon) * math.cos(math.radians(start.lat)), end.lat - start.lat)
+
     def same(distance):
         a, b = left.road(distance), right.road(distance)
-        return (bool(a.name) and a.name == b.name
-                and controlled_segment(a) == controlled_segment(b)
-                and haversine_m(left.point(distance), right.point(distance)) <= 8)
+        gap = haversine_m(left.point(distance), right.point(distance))
+        if gap > 15 or controlled_segment(a) != controlled_segment(b):
+            return False
+        u, v = heading(left, distance), heading(right, distance)
+        magnitude = math.hypot(*u) * math.hypot(*v)
+        if magnitude > 0 and (u[0] * v[0] + u[1] * v[1]) / magnitude < math.cos(math.radians(25)):
+            return False
+        if a.name and a.name == b.name and gap <= 8:
+            return True
+        na, nb = _norm_road_name(a.name), _norm_road_name(b.name)
+        if na and nb and (na == nb or (min(len(na), len(nb)) >= 3 and (na in nb or nb in na))) and gap <= 12:
+            return True
+        return gap <= 6
 
     if not same(0):
         # Some exits split immediately into different named surface roads.
         return 0.0 if haversine_m(left.point(0), right.point(0)) <= 5 else None
     previous = 0.0
-    for distance in range(20, int(maximum) + 20, 20):
+    distance = 20.0
+    while distance < maximum + 20:
         distance = min(distance, maximum)
         if not same(distance):
+            # Require a sustained, same-heading reunion rather than a later crossing.
+            end = min(maximum, distance + 400)
+            probes = [*range(int(distance) + 40, int(end), 40), end]
+            remerged = next((probe for probe in probes
+                             if probe + 40 <= maximum
+                             and all(same(probe + offset) for offset in (0, 20, 40))), None)
+            if remerged is not None:
+                previous = remerged + 40
+                distance = previous + 20
+                continue
             low, high = previous, distance
             while high - low > 1:
                 middle = (low + high) / 2
@@ -100,6 +138,9 @@ def common_prefix_end(driver, passenger):
                     high = middle
             return low
         previous = distance
+        if distance == maximum:
+            break
+        distance += 20
     return maximum
 
 

@@ -13,7 +13,7 @@ import httpx
 from .geometry import haversine_m, project_to_path, point_along_path
 from .models import (ModeOption, Place, PlaceSuggestion, Point, Preferences, Recommendation,
                      RecommendationRequest, RecommendationResponse, RoadSegment, Route, ComparisonOption, DrivingStep)
-from .optimizer import has_mode_minimum, execution_key, _assign_recommendation_labels, MAX_BOARDING_WALK_M, TAXI_WEIGHTS, is_viable, rank_recommendations, option_score, preferred_option, taxi_score_seconds
+from .optimizer import has_mode_minimum, execution_key, _assign_recommendation_labels, SOFT_MAX_BOARDING_WALK_M, TAXI_WEIGHTS, is_viable, rank_recommendations, option_score, preferred_option, taxi_score_seconds
 from .candidates import (Candidate, Station, build_candidates, search_centers, terminal_is_usable,
                          controlled_segment, restricted_road, dropoff_road_name, spread_items, interleave_groups)
 from .highway import ExitAnchor, highway_centers, original_exits, discovered_exit, exit_was_used
@@ -44,9 +44,12 @@ class RequestGate:
     async def wait(self):
         loop = asyncio.get_running_loop()
         async with self.lock:
-            while (delay := self.next_start - loop.time()) > 0:
-                await asyncio.sleep(delay)
-            self.next_start = loop.time() + self.interval
+            now = loop.time()
+            scheduled = max(now, self.next_start)
+            self.next_start = scheduled + self.interval
+            delay = scheduled - now
+        if delay > 0:
+            await asyncio.sleep(delay)
 
 
 # Shared by clients in the same server loop: overlapping searches also count.
@@ -71,6 +74,52 @@ def number(value, fallback=None):
 
 def polyline(value: str | None) -> list[Point]:
     return coordinates(value)
+
+
+def _point_line_distance_m(pt, start, end):
+    """Local planar distance from a point to a line segment, in metres."""
+    scale = math.cos(math.radians(pt.lat))
+    dx, dy = (end.lon - start.lon) * scale, end.lat - start.lat
+    px, py = (pt.lon - start.lon) * scale, pt.lat - start.lat
+    ratio = max(0.0, min(1.0, (px * dx + py * dy) / max(dx * dx + dy * dy, 1e-18)))
+    return 6371000.0 * math.radians(math.hypot(px - ratio * dx, py - ratio * dy))
+
+
+def _compact_line(pts, max_pts=28):
+    """Keep endpoints and the largest bends within the replay vertex budget."""
+    if not pts:
+        return []
+    if max_pts < 2:
+        raise ValueError("Polyline budget must allow both endpoints")
+    if len(pts) <= max_pts:
+        return [p.model_dump(mode="json") for p in pts]
+
+    from heapq import heappop, heappush
+
+    segments = []
+
+    def add_segment(left, right):
+        if right - left > 1:
+            error, index = max((_point_line_distance_m(pts[i], pts[left], pts[right]), i)
+                               for i in range(left + 1, right))
+            heappush(segments, (-error, index, left, right))
+
+    keep = {0, len(pts) - 1}
+    add_segment(0, len(pts) - 1)
+    while segments and len(keep) < max_pts:
+        error, index, left, right = heappop(segments)
+        if -error < 3.0:
+            break
+        keep.add(index)
+        add_segment(left, index)
+        add_segment(index, right)
+    # Retain some progress samples even on long, nearly straight roads.
+    stride = max(1, (len(pts) + max_pts - 2) // (max_pts - 1))
+    for index in range(0, len(pts), stride):
+        if len(keep) >= max_pts:
+            break
+        keep.add(index)
+    return [pts[i].model_dump(mode="json") for i in sorted(keep)]
 
 
 class AmapClient:
@@ -130,6 +179,9 @@ class AmapClient:
                     response.raise_for_status()
                     data = response.json()
                 except (httpx.HTTPError, ValueError) as exc:
+                    if attempt < 2:
+                        await asyncio.sleep(0.2 * (2 ** attempt))
+                        continue
                     raise MapServiceError("高德地图服务暂不可用，请稍后重试") from exc
                 if str(data.get("status")) == "1":
                     return data
@@ -262,7 +314,7 @@ class AmapClient:
         response = await self.get(
             "/v5/direction/transit/integrated", origin=origin.point.csv(),
             destination=destination.point.csv(), city1=origin.citycode,
-            city2=destination.citycode, strategy=0, AlternativeRoute=2,
+            city2=destination.citycode, strategy=0, AlternativeRoute=4,
             date=local.strftime("%Y-%m-%d"), time=local.strftime("%H-%M"),
             show_fields="cost,polyline")
         options, errors = [], []
@@ -270,7 +322,7 @@ class AmapClient:
             option = parse_itinerary(item, origin.citycode, destination.name)
             if option is None or option.transfers > prefs.max_transfers:
                 continue
-            if haversine_m(origin.point, option.boarding_stop.point) > MAX_BOARDING_WALK_M:
+            if haversine_m(origin.point, option.boarding_stop.point) > SOFT_MAX_BOARDING_WALK_M:
                 continue
             if option.original_access_m is None or option.original_access_s is None:
                 continue
@@ -280,7 +332,7 @@ class AmapClient:
             except MapServiceError as exc:
                 errors.append(exc)
                 continue
-            if access is None or access.distance_m > MAX_BOARDING_WALK_M:
+            if access is None or access.distance_m > SOFT_MAX_BOARDING_WALK_M:
                 continue
             option.boarding_walk_m = access.distance_m
             option.boarding_walk_route = access.polyline
@@ -321,7 +373,7 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
     if departure < now - timedelta(minutes=2):
         raise MapServiceError("出发时间已经过去，请重新选择中国时间的出发时间")
     warnings = ["当前为有预算的候选搜索，结果不保证全局最优。", "公交站台附近允许进入候选筛选；停靠位置的道路侧、禁停标志和靠边条件尚未核实。",
-                "仅公共交通方案要求到实际站台或入口步行不超过300米；同等条件优先更近站点，打车不受此限制。",
+                "公共交通优先到站步行300米以内，最多允许480米；超出300米增加评分惩罚，打车不受此限制。",
                 "驾车按查询时路况估算；到达时间不保证赶上具体班次，入口开放、安检及站内通行需另行确认。",
                 "当前用于出发前规划，不跟踪车辆位置；选定方案后及出发前请重新计算。"]
     async with httpx.AsyncClient() as client:
@@ -704,15 +756,6 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
             return [option for option in options
                     if option.mode != "taxi" or is_viable(option, request.preferences)]
 
-        def _compact_line(pts, max_pts=28):
-            if not pts:
-                return []
-            stride = max(1, (len(pts) + max_pts - 2) // (max_pts - 1))
-            sampled = pts[::stride]
-            if sampled[-1] != pts[-1]:
-                sampled.append(pts[-1])
-            return [p.model_dump(mode="json") for p in sampled]
-
         async def evaluate(candidate):
             nonlocal evaluated_count, pruned_count
             evaluated_count += 1
@@ -961,7 +1004,7 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                                    else "本次候选范围内没有更多通过限制且未被全面超过的独立方案")
                     warnings.append(f"{label}目前仅有{count}个推荐；{explanation}。")
         if not ranked:
-            warnings.append("已搜索范围内暂无符合限制的候选，不代表所有路线均无方案；公交接驳不会自动放宽300米限制。" if "transit" in request.preferences.modes else "已搜索范围内暂无同时满足司机增加时间和乘客打车费用上限的候选；打车不要求靠近公交或地铁。")
+            warnings.append("已搜索范围内暂无符合限制的候选，不代表所有路线均无方案；公交到站步行最多480米，全程步行仍受个人设置限制。" if "transit" in request.preferences.modes else "已搜索范围内暂无同时满足司机增加时间和乘客打车费用上限的候选；打车不要求靠近公交或地铁。")
         generated = datetime.now(timezone.utc)
         return RecommendationResponse(mode="live", baseline_route=baseline, recommendations=ranked,
             comparisons=comparisons, warnings=warnings, generated_at=generated, departure_at=departure,

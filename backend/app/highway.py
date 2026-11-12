@@ -14,8 +14,17 @@ class ExitAnchor:
     original: bool = False
 
 
+CLOSED_ROAD_KEYWORDS = (
+    "高速", "收费站", "高架", "快速路", "快速干道", "内环", "中环", "外环",
+    "三环主路", "四环主路", "五环主路", "隧道", "大桥", "立交", "枢纽",
+)
+SURFACE_ROAD_EXCLUSIONS = ("辅路", "地面", "辅道", "桥下")
+
+
 def _is_closed_motorway(segment) -> bool:
-    return "辅路" not in segment.name and any(w in segment.name for w in ("高速", "收费站"))
+    name = segment.name or ""
+    return (not any(word in name for word in SURFACE_ROAD_EXCLUSIONS)
+            and any(word in name for word in CLOSED_ROAD_KEYWORDS))
 
 
 def highway_centers(route: Route) -> list[Point]:
@@ -37,8 +46,8 @@ def original_exits(route: Route, citycode=None) -> list[ExitAnchor]:
         if not segment.polyline:
             continue
         if controlled_segment(segment):
-            # Universal road-hierarchy transition: when a closed toll motorway transitions
-            # onto an urban expressway at a city-entry toll plaza, record the transition anchor.
+            # Keep following controlled urban expressways; only record a transition
+            # when the next segment is outside the recognized closed-road classes.
             if (last_highway is not None
                     and _is_closed_motorway(last_highway)
                     and not _is_closed_motorway(segment)

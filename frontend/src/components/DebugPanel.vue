@@ -67,7 +67,7 @@ onMounted(checkHealth)
           <p v-else>本次返回 {{ result.recommendations.length }} 张方案卡片：打车 {{ resultCounts.taxi }} 张、公交 / 地铁 {{ resultCounts.transit }} 张、直接步行 {{ resultCounts.walk }} 张。已启动 {{ result.examined_candidates }} 个候选核验；该数量包含被拒绝或未完成的候选，不等于通过数量。</p>
           <p v-if="result.mode === 'live'">{{ result.search_complete === false ? '搜索覆盖不完整，当前仅展示已完成核验的可用方案。' : result.search_complete === true ? '本次候选范围内搜索已完成。' : '接口未提供搜索完成状态。' }}候选搜索受范围、名额和时间预算限制，不保证全局最优。</p>
           <p>打车与公交分别排名，同一下车点的两种方式分别成卡，合计最多六张。混合模式下有足够合格方案时，每种车辆交通方式至少保留两张；直接步行不计入此数量，方案不足时不凑数。</p>
-          <p v-if="snapshot?.preferences.modes.includes('transit')">公交到实际首乘站台或入口的步行上限为 {{ result.station_walk_limit_m }} 米；本次全程步行上限 {{ snapshot.preferences.max_walking_m }} 米、换乘上限 {{ snapshot.preferences.max_transfers }} 次。打车不受公交到站距离限制。</p>
+          <p v-if="snapshot?.preferences.modes.includes('transit')">公交到实际首乘站台或入口的步行上限为 {{ result.station_walk_limit_m }} 米（优先300米以内，超出部分增加评分惩罚）；本次全程步行上限 {{ snapshot.preferences.max_walking_m }} 米、换乘上限 {{ snapshot.preferences.max_transfers }} 次。打车不受公交到站距离限制。</p>
           <p v-if="result.mode === 'live'">已取得 {{ result.comparisons?.length ?? 0 }} 组对照方案。{{ result.comparisons?.length ? '具体时间、费用及可用交通方式见下方对照。' : '本次缺少可用对照，不能判断中途下车是否优于直接出行。' }}真实候选的临停合法性仍待现场确认。</p>
           <details v-if="result.warnings.length"><summary>接口诊断与限制（{{ result.warnings.length }} 条）</summary><ul><li v-for="(warning, index) in result.warnings" :key="index">{{ warning }}</li></ul></details>
         </section>

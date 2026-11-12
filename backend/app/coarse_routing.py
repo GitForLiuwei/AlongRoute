@@ -3,7 +3,7 @@ import asyncio
 import os
 
 from .candidates import interleave_groups
-from .geometry import haversine_m, project_to_path
+from .geometry import haversine_m, point_along_path, project_to_path
 from .osrm import OsrmClient
 from .preselection import candidate_key, candidate_trace
 from .search_log import event
@@ -15,25 +15,38 @@ COARSE_TAXI_WEIGHTS = {
 }
 
 
-def geometry_estimate(candidate, routes, destination):
+def geometry_estimate(candidate, routes, destination, *, length_cache=None):
+    # Owned by this estimate batch; never attach stale lengths to mutable Route models.
+    if length_cache is None:
+        length_cache = {}
     choices = []
     base = min(r.duration_s for r in routes)
     pt = candidate.place.point
     known_shared_s = getattr(candidate, 'approach_duration_s', None)
     for route in routes:
         _, progress, gap = project_to_path(pt, route.polyline)
-        length = sum(haversine_m(a, b) for a, b in zip(route.polyline, route.polyline[1:]))
+        key = id(route)
+        if key not in length_cache:
+            length_cache[key] = sum(haversine_m(a, b) for a, b in zip(route.polyline, route.polyline[1:]))
+        length = length_cache[key]
         route_speed = max(10.0, min(24.0, length / max(route.duration_s, 1)))
+        street_speed = 32 / 3.6
+        spike_detour = 2 * gap / street_speed
+        blend = min(1.0, max(0.0, (gap - 1800.0) / 1200.0))
+        local_detour = spike_detour
         if gap <= 1800:
-            local_detour = 2 * gap / (32 / 3.6)
-            shared_est = route.duration_s * progress / max(length, 1) + gap / (32 / 3.6)
+            access_s = gap / street_speed
         else:
-            a_pt, b_pt = route.polyline[0], route.polyline[-1]
+            # A local chord avoids treating a long curved route as one straight shortcut.
+            window_m = max(1800.0, 2 * gap)
+            a_pt = point_along_path(route.polyline, max(0.0, progress - window_m))
+            b_pt = point_along_path(route.polyline, min(length, progress + window_m))
             tri_excess_m = max(0.0, haversine_m(a_pt, pt) + haversine_m(pt, b_pt) - haversine_m(a_pt, b_pt))
-            branch_detour = (tri_excess_m * 1.35) / route_speed + min(1800.0, gap) / (32 / 3.6)
-            spike_detour = 2 * gap / (32 / 3.6)
-            local_detour = min(spike_detour, branch_detour)
-            shared_est = route.duration_s * progress / max(length, 1) + gap / max(route_speed * 0.75, 32 / 3.6)
+            branch_detour = tri_excess_m * 1.32 / route_speed + (1800.0 + 0.35 * (gap - 1800.0)) / street_speed
+            local_detour = (1 - blend) * spike_detour + blend * min(spike_detour, branch_detour)
+            access_s = ((1 - blend) * gap / street_speed
+                        + blend * gap / max(route_speed * 0.75, street_speed))
+        shared_est = route.duration_s * progress / max(length, 1) + access_s
         if known_shared_s is not None and known_shared_s > 0:
             rem_s = route.duration_s * max(0.0, length - progress) / max(length, 1) + gap / max(route_speed * 0.75, 32 / 3.6)
             detour = max(local_detour * 0.55, known_shared_s + rem_s - base)
@@ -136,8 +149,10 @@ def coverage_order(candidates, destination, modes, max_detour_s: float | None = 
 
 
 async def estimate_candidates(api, request, routes, candidates):
+    length_cache = {}
     for candidate in candidates:
-        candidate.coarse = geometry_estimate(candidate, routes, request.passenger_destination.point)
+        candidate.coarse = geometry_estimate(candidate, routes, request.passenger_destination.point,
+                                             length_cache=length_cache)
     url = os.getenv('OSRM_BASE_URL', '').strip()
     if url and candidates:
         try:

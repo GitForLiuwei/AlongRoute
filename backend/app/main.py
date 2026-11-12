@@ -1,12 +1,13 @@
 """HTTP API: /api/config, /api/health, /api/places/suggest, /api/recommend."""
 import asyncio
 import os
+import re
 from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 
@@ -26,7 +27,7 @@ async def log_search(request: Request, call_next):
             "/api/evaluate-dropoff": "manual"}.get(request.url.path)
     if not kind:
         return await call_next(request)
-    trace, token = start_trace(kind)
+    trace, token = start_trace(kind, trace_id=request.headers.get("X-Search-ID") if kind == "route" else None)
     trace.emit("search_started", method=request.method, path=request.url.path)
     try:
         response = await call_next(request)
@@ -63,6 +64,21 @@ def health():
 def config():
     return {"mode": "live" if os.getenv("AMAP_WEB_SERVICE_KEY", "").strip() else "demo",
             "map_proxy_ready": bool(os.getenv("AMAP_JS_SECURITY_CODE", "").strip())}
+
+
+@app.get("/api/search-replay/{identifier}/stream")
+async def search_replay_stream(identifier: str, request: Request):
+    from .search_log import get_or_create_trace, TraceCapacityError
+    from .search_replay import stream_replay
+
+    if not re.fullmatch(r"[a-f0-9]{32}", identifier):
+        raise HTTPException(422, "无效的日志标识")
+    try:
+        trace = get_or_create_trace(identifier)
+    except TraceCapacityError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return StreamingResponse(stream_replay(trace, request), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/search-replay/{identifier}")

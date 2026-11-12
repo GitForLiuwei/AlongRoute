@@ -23,9 +23,12 @@ def test_surface_reservation_and_empty_pool_backfill():
     primary = [candidate(i) for i in range(60)]
     surface = [candidate(i + 100, "baseline_surface") for i in range(20)]
     selected, truncated = select_candidates(primary, surface)
-    assert len(selected) == 48 and truncated
-    assert sum("baseline_surface" in c.origins for c in selected) == 12
-    assert len(select_candidates(primary, [])[0]) == 48
+    assert len(selected) == 24 and truncated
+    assert sum("baseline_surface" in c.origins for c in selected) == 6
+    assert len(select_candidates(primary, [])[0]) == 24
+    expanded, _ = select_candidates(primary, surface, limit=48, surface_reserve=12)
+    assert len(expanded) == 48
+    assert sum("baseline_surface" in c.origins for c in expanded) == 12
     assert len(select_candidates([], surface, limit=15)[0]) == 15
 
 
@@ -51,7 +54,9 @@ def test_quota_diagnostics_identify_displaced_and_merged_candidates(monkeypatch)
     events = []
     monkeypatch.setattr("app.preselection.event", lambda name, **fields: events.append((name, fields)))
     primary = [candidate(i) for i in range(4)]
-    select_candidates(primary, [candidate(100), candidate(0, "baseline_surface")], limit=3, surface_reserve=1)
+    reserved = candidate(100)
+    reserved.estimate_s = -1
+    select_candidates(primary, [reserved, candidate(0, "baseline_surface")], limit=3, surface_reserve=1)
     assert any(fields.get("decision") == "merged" for _, fields in events)
     assert any(fields.get("decision") == "quota_limit" for _, fields in events)
     summary = next(fields for name, fields in events if name == "preselection_summary")

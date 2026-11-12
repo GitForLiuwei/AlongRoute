@@ -36,6 +36,7 @@ def itinerary(duration=600, walking=200, transfers=0, kind="公交线路", entra
 
 def run_transit(monkeypatch, items, access=200, walking_calls=None, access_duration_s=100):
     async def fake_get(self, path, **params):
+        assert params['AlternativeRoute'] == 4
         return {"route": {"transits": items}}
 
     async def walking(self, origin, destination):
@@ -57,12 +58,37 @@ def run_transit(monkeypatch, items, access=200, walking_calls=None, access_durat
     return asyncio.run(query())
 
 
-@pytest.mark.parametrize("distance,accepted", [(299, True), (300, True), (301, False), (None, False)])
+@pytest.mark.parametrize("distance,accepted", [(299, True), (300, True), (301, True), (480, True), (481, False), (None, False)])
 def test_actual_station_walking_boundary(monkeypatch, distance, accepted):
     options = run_transit(monkeypatch, [itinerary()], access=distance)
     assert bool(options) is accepted
     if options:
         assert options[0].boarding_walk_m == distance
+
+
+@pytest.mark.parametrize("straight_m,walk_m,accepted", [(350, 480, True), (350, 481, False), (481, 500, False)])
+def test_buffer_is_applied_to_both_straight_and_verified_walking_distance(monkeypatch, straight_m, walk_m, accepted):
+    import math
+    stop = Point(lon=P.lon, lat=P.lat + math.degrees(straight_m / 6371000))
+    item = itinerary(walking=500)
+    item["segments"][0]["bus"]["buslines"][0]["departure_stop"]["location"] = stop.csv()
+
+    async def get(self, path, **params):
+        return {"route": {"transits": [item]}}
+
+    async def walking(self, origin, destination):
+        return Route(duration_s=100, distance_m=walk_m, polyline=[origin, destination])
+
+    monkeypatch.setattr(AmapClient, "get", get)
+    monkeypatch.setattr(AmapClient, "walking", walking)
+
+    async def query():
+        async with httpx.AsyncClient() as client:
+            return await AmapClient("test", client).transit(
+                Place(name="P", point=P, citycode="020"), Place(name="C", point=C, citycode="020"),
+                datetime.now(timezone.utc), Preferences())
+
+    assert bool(asyncio.run(query())) is accepted
 
 
 def test_constraints_apply_before_fastest_itinerary_selection(monkeypatch):
@@ -171,7 +197,7 @@ def test_candidate_search_keeps_points_near_bus_platform(mode):
     candidates = build_candidates(route, [near_stop], [Station(Place(name="Bus", point=P), "bus")], request)
     assert candidates
     assert any(candidate.place == near_stop for candidate in candidates)
-    assert any(candidate.station_distance_m <= 300 for candidate in candidates)  # Final itineraries enforce 300m, not POI centers.
+    assert any(candidate.station_distance_m <= 300 for candidate in candidates)  # Final itineraries verify up to 480m of walking, not POI centers.
 
 
 def test_highways_and_remote_road_snaps_are_rejected():

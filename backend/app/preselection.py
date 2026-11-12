@@ -21,7 +21,7 @@ def candidate_trace(candidate):
 
 
 def select_candidates(primary, surface, limit=MAX_CANDIDATES, surface_reserve=SURFACE_RESERVE):
-    """Preserve primary order, reserve surface coverage, and backfill unused slots.
+    """Rank merged estimates, reserve surface coverage, and backfill unused slots.
 
     Only identical coordinates AND exit constraints merge. Road sides/levels are
     never inferred equivalent from proximity. Mutated records are request-local.
@@ -36,6 +36,7 @@ def select_candidates(primary, surface, limit=MAX_CANDIDATES, surface_reserve=SU
                 existing = unique[key]
                 existing.modes = tuple(dict.fromkeys((*existing.modes, *candidate.modes)))
                 existing.origins = sorted(set(existing.origins + candidate.origins))
+                existing.estimate_s = min(existing.estimate_s, candidate.estimate_s)
                 # Same physical point can satisfy both source pools; never spend two slots.
                 if existing not in pools[pool_index]:
                     pools[pool_index].append(existing)
@@ -43,6 +44,8 @@ def select_candidates(primary, surface, limit=MAX_CANDIDATES, surface_reserve=SU
             else:
                 unique[key] = candidate
                 pools[pool_index].append(candidate)
+    for pool in pools:
+        pool.sort(key=lambda candidate: candidate.estimate_s)
     reserve = min(max(0, surface_reserve), max(0, limit), len(pools[1]))
     reserved = pools[1][:reserve]
     reserved_keys = {candidate_key(c) for c in reserved}

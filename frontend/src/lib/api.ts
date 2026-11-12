@@ -53,7 +53,7 @@ export type RecommendationResponse = {
   generated_at: string; examined_candidates: number
   comparisons?: { label: string; options: ModeOption[] }[]
   search_complete?: boolean; departure_at?: string | null; expires_at?: string | null
-  station_walk_limit_m: 300
+  station_walk_limit_m: 480
 }
 export type RecommendationRequest = {
   origin: Place; driver_destination: Place; passenger_destination: Place
@@ -110,8 +110,18 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   }
 }
 export function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> { return requestJson<T>(path, { signal }) }
+let latestSearchId = ''
+export function getLatestSearchId(): string { return latestSearchId }
+function generateSearchId(): string {
+  const bytes = new Uint8Array(16)
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') crypto.getRandomValues(bytes)
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256)
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+}
 export function apiPost<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
-  return requestJson<T>(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal })
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (path === '/api/recommend') headers['X-Search-ID'] = latestSearchId = generateSearchId()
+  return requestJson<T>(path, { method: 'POST', headers, body: JSON.stringify(body), signal })
 }
 export function duration(s: number): string {
   const minutes = Math.ceil(s / 60)
