@@ -36,9 +36,19 @@ class ProductionApp:
         is_map = path == "/_AMapService" or path.startswith("/_AMapService/")
         if is_api or is_map:
             now = monotonic()
-            client = (scope.get("client") or ("unknown", 0))[0]
+            peer_ip = (scope.get("client") or ("unknown", 0))[0]
+            client = peer_ip
+            if peer_ip in {"127.0.0.1", "::1", "localhost"}:
+                raw_headers = dict(scope.get("headers") or [])
+                xff = raw_headers.get(b"x-forwarded-for", b"").decode("latin1").strip()
+                xri = raw_headers.get(b"x-real-ip", b"").decode("latin1").strip()
+                if xff:
+                    client = xff.split(",")[0].strip() or peer_ip
+                elif xri:
+                    client = xri
             planning = path in {"/api/recommend", "/api/evaluate-dropoff"}
-            bucket = "planning" if planning else "map" if is_map else "api"
+            is_stream = path.startswith("/api/search-replay/") and path.endswith("/stream")
+            bucket = "planning" if planning else "map" if is_map else "stream" if is_stream else "api"
             key = (client, bucket)
             if key not in self.requests:
                 if len(self.requests) >= 4096:
@@ -49,7 +59,7 @@ class ProductionApp:
             for queue in (recent, self.global_requests):
                 while queue and queue[0] <= now - 60:
                     queue.popleft()
-            limit = 6 if planning else 180 if is_map else 60
+            limit = 6 if planning else 180 if is_map else 120 if is_stream else 60
             if len(recent) >= limit or len(self.global_requests) >= 600:
                 response = JSONResponse({"detail": "请求过于频繁，请稍后再试"}, status_code=429,
                                         headers={"Retry-After": "60"})

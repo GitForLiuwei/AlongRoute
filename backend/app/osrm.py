@@ -97,7 +97,10 @@ class OsrmClient:
         try:
             # Bound both requests as a unit and cancel siblings on timeout.
             first_res, second_res = await asyncio.wait_for(asyncio.gather(
-                table([0], [1, *indices]), table(indices, [1, 2]), return_exceptions=True), self.timeout + .3)
+                table([0], [1, *indices], use_bearings=True), table(indices, [1, 2], use_bearings=True), return_exceptions=True), self.timeout + .3)
+            if (isinstance(first_res, Exception) or isinstance(second_res, Exception)) and bearing_param:
+                first_res, second_res = await asyncio.wait_for(asyncio.gather(
+                    table([0], [1, *indices], use_bearings=False), table(indices, [1, 2], use_bearings=False), return_exceptions=True), self.timeout + .3)
             if isinstance(first_res, Exception) or isinstance(second_res, Exception):
                 raise ValueError('matrix_request_failed')
             first, remote_first = first_res

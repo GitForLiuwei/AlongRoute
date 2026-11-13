@@ -31,20 +31,33 @@ class MapResponseCache:
         self._bytes = 0
         self._lock = Lock()
         self._storage_warning = False
+        self._db_initialized = False
+        self._write_count = 0
 
     @contextmanager
     def _database(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.db_path, timeout=1)
+        connection = sqlite3.connect(self.db_path, timeout=5.0)
         try:
-            with connection:
-                connection.execute("""CREATE TABLE IF NOT EXISTS responses (
-                    cache_key BLOB PRIMARY KEY,
-                    expires_at REAL NOT NULL,
-                    accessed_at REAL NOT NULL,
-                    payload BLOB NOT NULL
-                )""")
-                yield connection
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
+            connection.execute("PRAGMA busy_timeout=5000")
+            if not self._db_initialized:
+                with connection:
+                    connection.execute("""CREATE TABLE IF NOT EXISTS responses (
+                        cache_key BLOB PRIMARY KEY,
+                        expires_at REAL NOT NULL,
+                        accessed_at REAL NOT NULL,
+                        payload BLOB NOT NULL
+                    )""")
+                    connection.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_responses_accessed_at ON responses (accessed_at)"
+                    )
+                    connection.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_responses_expires_at ON responses (expires_at)"
+                    )
+                self._db_initialized = True
+            yield connection
         finally:
             connection.close()
 
@@ -80,12 +93,66 @@ class MapResponseCache:
             now = time()
             try:
                 with self._database() as database:
-                    database.execute("DELETE FROM responses WHERE expires_at <= ?", (now,))
                     entry = database.execute(
                         "SELECT expires_at, payload FROM responses WHERE cache_key = ?", (key,)
                     ).fetchone()
                     if entry is not None:
-                        database.execute("UPDATE responses SET accessed_at = ? WHERE cache_key = ?", (now, key))
+                        if entry[0] <= now:
+                            with database:
+                                database.execute("DELETE FROM responses WHERE cache_key = ?", (key,))
+                            entry = None
+                        else:
+                            with database:
+                                database.execute("UPDATE responses SET accessed_at = ? WHERE cache_key = ?", (now, key))
+                self._storage_warning = False
+            except (OSError, sqlite3.Error):
+                self._storage_failed()
+                entry = self._entries.get(key)
+            if entry is None or entry[0] <= now:
+                if key in self._entries:
+                    self._remove(key)
+                return None
+            expires, payload = entry
+            self._remember(key, expires, payload)
+            # Deserialize a fresh value so callers cannot modify cached data.
+            try:
+                return json.loads(payload)
+            except (ValueError, UnicodeError):
+                return None
+
+    def put(self, key, path, data):
+        ttl = TTL_SECONDS.get(path, 0)
+        if ttl <= 0 or not isinstance(data, dict) or str(data.get("status")) != "1":
+            return
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        if len(payload) > self.max_bytes:
+            return
+        with self._lock:
+            now = time()
+            expires = now + ttl
+            self._remember(key, expires, payload)
+            self._write_count += 1
+            should_prune = (self._write_count == 1) or (self._write_count % 32 == 0)
+            try:
+                with self._database() as database:
+                    with database:
+                        database.execute("""INSERT OR REPLACE INTO responses
+                            (cache_key, expires_at, accessed_at, payload) VALUES (?, ?, ?, ?)""",
+                            (key, expires, now, payload))
+                        if should_prune:
+                            database.execute("DELETE FROM responses WHERE expires_at <= ?", (now,))
+                            count, size = database.execute(
+                                "SELECT COUNT(*), COALESCE(SUM(LENGTH(payload)), 0) FROM responses"
+                            ).fetchone()
+                            if count > self.max_entries or size > self.max_bytes:
+                                for old_key, old_size in database.execute(
+                                    "SELECT cache_key, LENGTH(payload) FROM responses ORDER BY accessed_at, cache_key"
+                                ).fetchall():
+                                    if count <= self.max_entries and size <= self.max_bytes:
+                                        break
+                                    database.execute("DELETE FROM responses WHERE cache_key = ?", (old_key,))
+                                    count -= 1
+                                    size -= old_size
                 self._storage_warning = False
             except (OSError, sqlite3.Error):
                 self._storage_failed()

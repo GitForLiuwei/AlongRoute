@@ -174,6 +174,28 @@ async def recommend(request: RecommendationRequest, http_request: Request):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+_proxy_http_client: httpx.AsyncClient | None = None
+
+
+def _get_proxy_http_client() -> httpx.AsyncClient:
+    """Return a shared, pooled AsyncClient for AMap JS API proxy requests."""
+    global _proxy_http_client
+    if _proxy_http_client is None or _proxy_http_client.is_closed:
+        _proxy_http_client = httpx.AsyncClient(
+            timeout=20.0,
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=64),
+        )
+    return _proxy_http_client
+
+
+@app.on_event("shutdown")
+async def _close_proxy_http_client() -> None:
+    global _proxy_http_client
+    if _proxy_http_client is not None and not _proxy_http_client.is_closed:
+        await _proxy_http_client.aclose()
+        _proxy_http_client = None
+
+
 @app.api_route("/_AMapService/{path:path}", methods=["GET", "POST"])
 async def js_api_proxy(path: str, request: Request):
     """Local-dev-only JS security proxy. Production requires IP limits / rate limits."""
@@ -189,8 +211,8 @@ async def js_api_proxy(path: str, request: Request):
     params = [(k, v) for k, v in request.query_params.multi_items() if k != "jscode"]
     params.append(("jscode", security))
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            upstream = await client.get(f"{upstream_base}/{path}", params=params)
+        client = _get_proxy_http_client()
+        upstream = await client.get(f"{upstream_base}/{path}", params=params)
     except httpx.HTTPError as exc:
         raise HTTPException(502, "高德 JS 请求失败") from exc
     headers = {"cache-control": "private, max-age=30"}

@@ -103,7 +103,7 @@ class SearchTrace:
             return list(self.records)
 
     def subscribe(self, loop):
-        queue = asyncio.Queue()
+        queue = asyncio.Queue(maxsize=512)
         with self._lock:
             snapshot = list(self.records)
             self._subscribers.append((loop, queue))

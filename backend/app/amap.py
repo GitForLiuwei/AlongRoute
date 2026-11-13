@@ -741,7 +741,8 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                 try:
                     taxi = await api.driving(place.point, request.passenger_destination.point)
                     if taxi:
-                        wait = 300
+                        _pname = getattr(place, "name", "") or ""
+                        wait = 180 if any(k in _pname for k in ("地铁", "站", "枢纽", "广场", "客运")) else 300
                         options.append(ModeOption(mode="taxi", duration_s=taxi.duration_s + wait,
                             wait_estimate_s=wait, fare_yuan=taxi.fare_yuan, walking_m=None, transfers=0,
                             details="驾车时间＋假设5分钟接车缓冲（非实时等车预测）", route=taxi.polyline,

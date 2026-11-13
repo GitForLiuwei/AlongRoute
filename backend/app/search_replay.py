@@ -78,22 +78,31 @@ def read_replay(identifier):
 
 
 async def stream_replay(trace, request=None):
-    """Send the snapshot and subsequent events, with cleanup on disconnect/cancel."""
+    """Send the snapshot and subsequent events, with 115s timeout alignment and orphan fast-exit."""
     loop = asyncio.get_running_loop()
     snapshot, queue = trace.subscribe(loop)
     snapshot = deque(snapshot)
-    deadline = loop.time() + 120  # Planning's server timeout is 110 seconds.
+    started_at = loop.time()
+    deadline = started_at + 115.0  # Aligned with planning's 110s server timeout (+5s grace).
+    orphan_deadline = started_at + 6.0  # Fast-exit if POST /api/recommend never starts this trace.
+    seen_any_event = bool(snapshot) or getattr(trace, "sequence", 0) > 0
     try:
         # Flush headers immediately, even if the POST has not arrived yet.
         yield ': connected\n\n'
         while True:
             if snapshot:
                 record = snapshot.popleft()
+                seen_any_event = True
             else:
-                if loop.time() >= deadline or (request is not None and await request.is_disconnected()):
+                now = loop.time()
+                if now >= deadline or (request is not None and await request.is_disconnected()):
+                    return
+                if not seen_any_event and getattr(trace, "sequence", 0) == 0 and now >= orphan_deadline:
+                    yield 'event: done\ndata: {"finished": false, "reason": "orphan_timeout"}\n\n'
                     return
                 try:
-                    record = await asyncio.wait_for(queue.get(), timeout=1)
+                    record = await asyncio.wait_for(queue.get(), timeout=1.0)
+                    seen_any_event = True
                 except asyncio.TimeoutError:
                     yield ': keep-alive\n\n'
                     continue
