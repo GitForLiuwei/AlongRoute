@@ -13,7 +13,7 @@ from .coarse_routing import estimate_candidates, geometry_estimate, coverage_ord
 from .exit_discovery import FocusedDiscovery
 from .geometry import haversine_m, point_along_path, project_to_path, sample_path
 from .highway import original_exits
-from .hub_store import hub_store
+from .hub_store import extract_transit_line_tokens, hub_store
 from .models import Place
 from .preselection import select_candidates
 from .search_log import event
@@ -159,6 +159,16 @@ class HubDiscovery:
                       if haversine_m(center, p.point) <= 5000 and not restricted_road(p.name)
                       and not (is_far_dest_center and haversine_m(p.point, dest_pt) < 900)}
 
+            # Reverse Transit Isochrone Lookup: find subway lines serving passenger destination C in <1ms via R-Tree
+            _dest_lines: set[str] = set()
+            if kind == 'subway':
+                try:
+                    _dest_hubs, _ = hub_store.lookup('amap_v5', dest_pt, 'subway', 3500)
+                    for _dh in _dest_hubs:
+                        _dest_lines.update(extract_transit_line_tokens(_dh.name))
+                except Exception:
+                    pass
+
             def seed_priority(p):
                 dist_center = haversine_m(center, p.point)
                 dist_c = haversine_m(p.point, dest_pt)
@@ -167,7 +177,8 @@ class HubDiscovery:
                 else:
                     core_tier = 0 if dist_center <= 3000 else 1
                 entrance_rank = 0 if (kind == 'subway' and '口' in p.name) else 1
-                return (core_tier, entrance_rank, round(dist_center, -2), p.point.csv())
+                direct_line_rank = 0 if (_dest_lines and (extract_transit_line_tokens(p.name) & _dest_lines)) else 1
+                return (core_tier, direct_line_rank, entrance_rank, round(dist_center, -2), p.point.csv())
 
             places = sorted(unique.values(), key=seed_priority)[:25]
             for place in places:
@@ -344,9 +355,18 @@ def recall_centers(routes, destination, limit=6, driver_routes=None, max_corrido
     driver_list = driver_routes or []
     driver_ids = {id(r) for r in driver_list}
 
+    # Spatio-Temporal Elliptical Pruning (Stiglic et al., 2015): focal points A (origin) and B (driver dest)
+    _focal_a = next((r.polyline[0] for r in driver_list if r.polyline), None)
+    _focal_b = next((r.polyline[-1] for r in driver_list if r.polyline), None)
+    _ab_chord_m = haversine_m(_focal_a, _focal_b) if (_focal_a and _focal_b) else 0.0
+
     def within_corridor(pt):
         if not driver_list or max_corridor_m is None:
             return True
+        if _focal_a and _focal_b and _ab_chord_m > 2000.0:
+            # Elliptical major-axis excess bound: |AP| + |PB| - |AB| <= 2.2 * max_corridor_m
+            if (haversine_m(_focal_a, pt) + haversine_m(pt, _focal_b) - _ab_chord_m) > max_corridor_m * 2.2:
+                return False
         return min((project_to_path(pt, r.polyline)[2] for r in driver_list if r.polyline), default=0.0) <= max_corridor_m
 
     dest_near = within_corridor(destination)

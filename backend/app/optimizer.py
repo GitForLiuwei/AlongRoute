@@ -88,6 +88,35 @@ def preferred_option(options: list[ModeOption], priority: str) -> ModeOption:
     return min(comparable, key=lambda option: (option.boarding_walk_m, option_score(option, priority))) if comparable else best
 
 
+def _pareto_mrs_knee_bonus_s(rec: Recommendation, frontier: list[Recommendation], priority: str = "balanced") -> Decimal:
+    """Compute Marginal Rate of Substitution (MRS) synergy bonus (in Decimal seconds) for Pareto knee-point candidates.
+
+    Rewards drop-off hubs where a modest extra driver detour yields a disproportionately large
+    reduction in passenger travel duration and/or taxi fare compared to minimal-detour points.
+    """
+    if not frontier or not rec.options:
+        return Decimal(0)
+    baseline = min(frontier, key=lambda r: r.driver_detour_s)
+    if baseline is rec or not baseline.options:
+        return Decimal(0)
+    detour_delta_s = float(rec.driver_detour_s - baseline.driver_detour_s)
+    if detour_delta_s <= 60.0 or detour_delta_s > 1200.0:
+        return Decimal(0)
+    _, _, sec_per_yuan = TAXI_WEIGHTS.get(priority, TAXI_WEIGHTS["balanced"])
+    opt_cur = rec.options[0]
+    opt_base = baseline.options[0]
+    cur_pax_cost_s = float(opt_cur.total_duration_s or opt_cur.duration_s) + float(opt_cur.fare_yuan or 0.0) * float(sec_per_yuan)
+    base_pax_cost_s = float(opt_base.total_duration_s or opt_base.duration_s) + float(opt_base.fare_yuan or 0.0) * float(sec_per_yuan)
+    pax_saving_s = base_pax_cost_s - cur_pax_cost_s
+    if pax_saving_s <= 0.0:
+        return Decimal(0)
+    mrs = pax_saving_s / detour_delta_s
+    if mrs >= 3.2:
+        bonus_val = min(360.0, (mrs - 3.2) * 90.0)
+        return Decimal(str(round(bonus_val, 2)))
+    return Decimal(0)
+
+
 def taxi_score_seconds(driver_detour_s: int, option: ModeOption, priority: str = "balanced"):
     """Weighted combined driver detour (with piecewise convex penalty above 18 min),
     passenger trip time, and taxi fare in exact Decimal seconds."""
@@ -249,7 +278,8 @@ def rank_taxi_recommendations(recs: list[Recommendation], prefs: Preferences) ->
             frontier.append(rec)
 
     ordered = sorted(frontier, key=lambda rec: (
-        taxi_score_seconds(rec.driver_detour_s, rec.options[0], prefs.priority),
+        taxi_score_seconds(rec.driver_detour_s, rec.options[0], prefs.priority)
+        - _pareto_mrs_knee_bonus_s(rec, frontier, prefs.priority),
         rec.driver_detour_s + rec.options[0].total_duration_s,
         rec.options[0].fare_yuan, rec.driver_detour_s, rec.id))
 

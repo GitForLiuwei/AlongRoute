@@ -783,6 +783,17 @@ async def calculate_live(request: RecommendationRequest) -> RecommendationRespon
                 pruned_count += 1
                 reject("detour_bound_pruned", driver_detour_s=max(est_total_detour, round(min_coarse + 600)))
                 return
+            # A* Admissible Lower-Bound Pre-Check: skip expensive AMap driving/transit calls when
+            # all requested modes already have >=2 valid options and optimistic bound cannot beat top-6.
+            if len(results) >= 6:
+                _pre_shortlist = rank_recommendations(results, request.preferences)
+                if len({execution_key(r) for r in _pre_shortlist}) >= 6 and has_mode_minimum(_pre_shortlist, request.preferences):
+                    _worst_kept_detour = max(r.driver_detour_s for r in _pre_shortlist)
+                    _optimistic_detour = max(0.0, est_total_detour * 0.85 - 120.0)
+                    if _optimistic_detour > _worst_kept_detour + 1200:
+                        pruned_count += 1
+                        reject("detour_bound_pruned", driver_detour_s=est_total_detour)
+                        return
             try:
                 waypoints = [candidate.approach, candidate.exit_place.point, place.point] if candidate.exit_place and candidate.approach else place.point
                 driver = await api.driving(request.origin.point, request.driver_destination.point, via=waypoints)

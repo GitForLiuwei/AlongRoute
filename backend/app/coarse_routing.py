@@ -24,7 +24,7 @@ def geometry_estimate(candidate, routes, destination, *, length_cache=None):
     pt = candidate.place.point
     known_shared_s = getattr(candidate, 'approach_duration_s', None)
     for route in routes:
-        _, progress, gap = project_to_path(pt, route.polyline)
+        _, progress, gap, seg_bearing, is_right = project_to_path_with_kinematics(pt, route.polyline)
         key = id(route)
         if key not in length_cache:
             length_cache[key] = sum(haversine_m(a, b) for a, b in zip(route.polyline, route.polyline[1:]))
@@ -54,28 +54,56 @@ def geometry_estimate(candidate, routes, destination, *, length_cache=None):
         else:
             detour = local_detour + max(0, route.duration_s - base)
             shared = shared_est
-        choices.append((detour + shared, detour, shared))
-    _, detour, shared = min(choices)
+        choices.append((detour + shared, detour, shared, seg_bearing, is_right, gap))
+    _, detour, shared, best_bearing, best_right, best_gap = min(choices)
     onward_m = haversine_m(pt, destination) * 1.35
     return dict(engine='geometry', shared_s=shared, detour_s=detour,
                 onward_s=onward_m / (32 / 3.6), onward_m=onward_m,
+                bearing_deg=best_bearing, right_side=best_right, gap_m=best_gap,
                 constraint_aware=False, missing_reason='not_configured')
+
+
+def _estimate_taxi_wait_s(candidate) -> float:
+    """Estimate ride-hailing dispatch & pickup wait time (seconds) based on hub tier and location."""
+    hub_kind = getattr(candidate, 'hub_kind', None) or getattr(candidate, 'source', '')
+    name = getattr(getattr(candidate, 'place', None), 'name', '') or ''
+    if hub_kind in {'subway', 'rail', 'hub'} or any(k in name for k in ('地铁', '站', '枢纽', '广场', '天河', '客运')):
+        return 180.0
+    if getattr(candidate, 'source', '') == 'exit' and not getattr(candidate, 'original_exit', True):
+        return 420.0
+    return 270.0
+
+
+def _estimate_toll_friction_s(candidate) -> float:
+    """Extra friction penalty for non-original highway exits and opposing-lane (left-hand side) roadside stops."""
+    penalty = 0.0
+    if getattr(candidate, 'exit_place', None) is not None and not getattr(candidate, 'original_exit', True):
+        penalty += 150.0
+    coarse = getattr(candidate, 'coarse', None) or {}
+    gap_m = coarse.get('gap_m')
+    if gap_m is not None and 5.0 < gap_m <= 180.0 and coarse.get('right_side') is False:
+        penalty += 75.0
+    return penalty
 
 
 def taxi_priority(candidate, priority: str = 'balanced'):
     e = candidate.coarse
     w_driver, w_pax, sec_per_yuan = COARSE_TAXI_WEIGHTS.get(priority, COARSE_TAXI_WEIGHTS['balanced'])
     stop = 180 if candidate.source == 'parking' else 90
-    detour_total_s = (e.get('detour_s') or 0) + stop
+    toll_friction_s = _estimate_toll_friction_s(candidate)
+    detour_total_s = (e.get('detour_s') or 0) + stop + toll_friction_s
     convex_excess_s = max(0.0, detour_total_s - 1080.0) * 0.75
     eff_detour_s = detour_total_s + convex_excess_s
     onward_m = e.get('onward_m') or 0
+    wait_s = _estimate_taxi_wait_s(candidate)
     if 0 < onward_m <= 1080:
         if detour_total_s <= 900:
             walk_s = onward_m / 1.25
             return w_driver * eff_detour_s + w_pax * (e['shared_s'] + stop + walk_s)
         fare = 12 + max(0, onward_m / 1000 - 3) * 2.4
-        return w_driver * eff_detour_s + w_pax * (e['shared_s'] + stop + e['onward_s'] + 300) + fare * sec_per_yuan + 1800.0
+        return w_driver * eff_detour_s + w_pax * (e['shared_s'] + stop + e['onward_s'] + wait_s) + fare * sec_per_yuan
+    fare = 12 + max(0, onward_m / 1000 - 3) * 2.4
+    return w_driver * eff_detour_s + w_pax * (e['shared_s'] + stop + e['onward_s'] + wait_s) + fare * sec_per_yuan + 1800.0
     fare = 12 + max(0, onward_m / 1000 - 3) * 2.4
     return w_driver * eff_detour_s + w_pax * (e['shared_s'] + stop + e['onward_s'] + 300) + fare * sec_per_yuan
 
@@ -156,9 +184,13 @@ async def estimate_candidates(api, request, routes, candidates):
     url = os.getenv('OSRM_BASE_URL', '').strip()
     if url and candidates:
         try:
+            _cand_bearings = [
+                (c.coarse or {}).get('bearing_deg') if ((c.coarse or {}).get('gap_m') or 999) <= 120 else None
+                for c in candidates
+            ]
             estimates = await asyncio.wait_for(OsrmClient(api.client, url).estimate(
                 request.origin.point, request.driver_destination.point, request.passenger_destination.point,
-                [c.place.point for c in candidates]), timeout=6)
+                [c.place.point for c in candidates], bearings=_cand_bearings), timeout=6)
         except asyncio.TimeoutError:
             estimates = []
         for i, candidate in enumerate(candidates):
@@ -166,8 +198,11 @@ async def estimate_candidates(api, request, routes, candidates):
             if e is None or e.missing_reason:
                 candidate.coarse['missing_reason'] = e.missing_reason if e else 'matrix_timeout'
             else:
+                _prev_c = candidate.coarse or {}
                 candidate.coarse = dict(engine='osrm', shared_s=e.shared_s, detour_s=e.detour_s,
                                         onward_s=e.onward_s, onward_m=e.onward_m, constraint_aware=False,
+                                        bearing_deg=_prev_c.get('bearing_deg'), right_side=_prev_c.get('right_side'),
+                                        gap_m=_prev_c.get('gap_m'),
                                         missing_reason=None, network_version=os.getenv('OSRM_DATA_VERSION', 'unspecified'))
     priority = getattr(request.preferences, 'priority', 'balanced') or 'balanced'
     for candidate in candidates:

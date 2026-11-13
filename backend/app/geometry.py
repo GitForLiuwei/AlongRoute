@@ -62,3 +62,51 @@ def sample_path(polyline: list[Point], count: int = 8) -> list[Point]:
                 break
             walked += distance
     return result
+
+
+def bearing_deg(a: Point, b: Point) -> float:
+    """Compute initial compass bearing in degrees [0, 360) from point a to point b."""
+    lat1, lat2 = math.radians(a.lat), math.radians(b.lat)
+    dlon = math.radians(b.lon - a.lon)
+    x = math.sin(dlon) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
+
+
+def project_to_path_with_kinematics(point: Point, path: list[Point]) -> tuple[Point, float, float, float, bool]:
+    """Return (projected_point, progress_m, lateral_m, tangent_bearing_deg, is_right_hand_side).
+
+    In right-hand traffic (China mainland), a drop-off point on the right side of the driver's
+    forward tangent vector avoids crossing opposing lanes or making U-turns.
+    """
+    if not path:
+        raise ValueError("Empty path")
+    if len(path) == 1:
+        return path[0], 0.0, haversine_m(point, path[0]), 0.0, True
+
+    best = path[0]
+    progress = 0.0
+    lateral = haversine_m(point, path[0])
+    best_bearing = bearing_deg(path[0], path[1])
+    best_right_side = True
+    walked = 0.0
+    scale = math.cos(math.radians(point.lat))
+
+    for a, b in zip(path, path[1:]):
+        dx, dy = (b.lon - a.lon) * scale, b.lat - a.lat
+        px, py = (point.lon - a.lon) * scale, point.lat - a.lat
+        denom = dx * dx + dy * dy
+        ratio = max(0.0, min(1.0, (px * dx + py * dy) / max(denom, 1e-18)))
+        projected = interpolate(a, b, ratio)
+        distance = haversine_m(point, projected)
+        length = haversine_m(a, b)
+        if distance < lateral:
+            best, progress, lateral = projected, walked + ratio * length, distance
+            if denom > 1e-16:
+                best_bearing = bearing_deg(a, b)
+                # 2D cross product (tangent x offset): dx * py - dy * px < 0 means right-hand side of travel
+                cross_z = dx * py - dy * px
+                best_right_side = bool(cross_z <= 0.0)
+        walked += length
+
+    return best, progress, lateral, best_bearing, best_right_side

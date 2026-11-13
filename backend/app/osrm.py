@@ -34,24 +34,37 @@ class OsrmClient:
         self.client, self.url, self.timeout = client, url.rstrip('/'), timeout
         self.batch_size = max(1, min(batch_size, 80))  # 83 locations incl. A/B/C.
 
-    async def estimate(self, a: Point, b: Point, c: Point, points: list[Point]):
+    async def estimate(self, a: Point, b: Point, c: Point, points: list[Point], bearings: list[float | None] | None = None):
         result = []
         for start in range(0, len(points), self.batch_size):
             batch = points[start:start + self.batch_size]
-            result.extend(await self._batch(a, b, c, batch))
+            batch_bearings = bearings[start:start + self.batch_size] if bearings else None
+            result.extend(await self._batch(a, b, c, batch, batch_bearings))
         return result
 
-    async def _batch(self, a, b, c, points):
+    async def _batch(self, a, b, c, points, bearings=None):
         coords = [gcj02_to_wgs84(p) for p in [a, b, c, *points]]
         indices = list(range(3, len(coords)))
         url = f"{self.url}/table/v1/driving/" + ';'.join(p.csv() for p in coords)
+        bearing_param = None
+        if bearings and len(bearings) == len(points) and any(b is not None for b in bearings):
+            parts = ['', '', '']
+            for b_deg in bearings:
+                if isinstance(b_deg, (int, float)) and math.isfinite(b_deg):
+                    parts.append(f"{int(round(b_deg)) % 360},60")
+                else:
+                    parts.append('')
+            bearing_param = ';'.join(parts)
 
-        async def table(sources, destinations):
-            response = await self.client.get(url, params={
+        async def table(sources, destinations, use_bearings=True):
+            req_params = {
                 'sources': ';'.join(map(str, sources)),
                 'destinations': ';'.join(map(str, destinations)),
                 'annotations': 'duration,distance',
-            }, timeout=self.timeout)
+            }
+            if use_bearings and bearing_param:
+                req_params['bearings'] = bearing_param
+            response = await self.client.get(url, params=req_params, timeout=self.timeout)
             response.raise_for_status()
             data = response.json()
             if not isinstance(data, dict) or data.get('code') != 'Ok':
