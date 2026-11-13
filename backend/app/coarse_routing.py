@@ -3,7 +3,7 @@ import asyncio
 import os
 
 from .candidates import interleave_groups
-from .geometry import haversine_m, point_along_path, project_to_path
+from .geometry import haversine_m, point_along_path, project_to_path_with_kinematics
 from .osrm import OsrmClient
 from .preselection import candidate_key, candidate_trace
 from .search_log import event
