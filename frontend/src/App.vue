@@ -125,14 +125,12 @@ function nearbyCardNote(r: Recommendation) {
     nearby ? `另有同名下车点，相距约${Math.max(1, Math.round(pointDistance(r.point, nearby.point)))}米（直线）` : ''].filter(Boolean).join('；')
 }
 function markerUrl(r: Recommendation) {
-  return `https://uri.amap.com/marker?position=${r.point.point.lon},${r.point.point.lat}&name=${encodeURIComponent(r.point.name)}&callnative=1`
+  return buildAmapMarkerUrl(r.point, isNativeApp)
 }
+
 function navigationUrl(r: Recommendation) {
   const req = snapshot.value
-  if (!req) return markerUrl(r)
-  const place = (p: Place) => `${p.point.lon},${p.point.lat},${encodeURIComponent(p.name)}`
-  // https://developer.amap.com/api/uri-api/guide/travel/route
-  return `https://uri.amap.com/navigation?from=${place(req.origin)}&to=${place(req.driver_destination)}&via=${place(r.point)}&mode=car&policy=0&callnative=1`
+  return buildAmapNavigationUrl(r.point, req?.origin ?? origin.value, req?.driver_destination ?? driverDestination.value, isNativeApp)
 }
 async function copyNegotiation(r: Recommendation) {
   if (result.value?.mode !== 'live' || stale.value || expired.value) return
@@ -223,9 +221,7 @@ async function run() {
 }
 function viewPlace() {
   if (!active.value || result.value?.mode !== 'live' || stale.value || expired.value) return
-  const { lon, lat } = active.value.point.point
-  const title = encodeURIComponent(active.value.point.name)
-  window.open(`https://uri.amap.com/marker?position=${lon},${lat}&name=${title}`, '_blank', 'noopener,noreferrer')
+  openAmapMarker(active.value.point)
 }
 async function copyPlace() {
   if (!active.value || result.value?.mode !== 'live' || stale.value || expired.value) return

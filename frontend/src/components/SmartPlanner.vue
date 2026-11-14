@@ -79,7 +79,7 @@ function modeName(r: Recommendation) { return option(r)?.direct_walk ? '直接�
 const shownResult = computed(() => props.loading ? null : props.result)
 const shownActive = computed(() => props.loading ? null : props.active)
 function navigationUrl(r: Recommendation) {
-  return buildAmapNavigationUrl(r.point, props.snapshot?.origin, props.snapshot?.driver_destination, false)
+  return buildAmapNavigationUrl(r.point, props.snapshot?.origin ?? props.origin, props.snapshot?.driver_destination ?? props.driverDestination, isNativeApp)
 }
 function startNavigation(r: Recommendation) {
   openAmapNavigation(r.point, props.snapshot?.origin ?? props.origin, props.snapshot?.driver_destination ?? props.driverDestination)
@@ -285,9 +285,12 @@ onBeforeUnmount(() => { stopReplay(); clearTimeout(copyTimer) })
               <p v-if="option(r)?.mode === 'transit' && !option(r)?.direct_walk" class="smart-transit-note"><TrainFront :size="12" />到站步行 {{ option(r)?.boarding_walk_m ?? '待核验' }} 米 · {{ option(r)?.transfers ?? '待核验' }} 次换乘</p>
               <div class="smart-card-foot"><ShieldAlert :size="12" /><span>停靠条件待核实</span><CheckCircle2 v-if="active && key(active) === key(r)" :size="14" /></div>
               <div v-if="active && key(active) === key(r)" class="smart-card-actions" @click.stop>
-                <button :disabled="!usable" @click="openShare"><Share2 :size="19" />发给司机确认此点</button>
-                <a v-if="usable" :href="navigationUrl(r)" target="_blank" rel="noopener noreferrer"><Navigation :size="19" />导航</a>
-                <button v-else disabled class="smart-card-navigation"><Navigation :size="19" />导航</button>
+                <button type="button" class="smart-nav-primary" :disabled="!usable" @click="startNavigation(r)"><Navigation :size="18" />高德地图导航</button>
+                <button type="button" :disabled="!usable" @click="openShare"><Share2 :size="18" />发给司机确认</button>
+                <button v-if="isNativeApp" type="button" class="smart-inline-detail-btn" :aria-expanded="detailsOpen" @click="detailsOpen = !detailsOpen">{{ detailsOpen ? '收起路线详情' : '查看路线详情' }}</button>
+              </div>
+              <div v-if="isNativeApp && detailsOpen && active && key(active) === key(r)" class="smart-inline-details" @click.stop>
+                <slot name="details" />
               </div>
             </article>
           </div>
