@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, watch, ref } from 'vue'
-import { ArrowRight, BadgeHelp, BusFront, CarFront, Check, ChevronRight, CircleAlert, Clock3,
-  Compass, ExternalLink, GitBranch, Info, LoaderCircle, MapPin, Menu, RefreshCcw, Route,
-  ShieldAlert, SlidersHorizontal, Sparkles, Wallet, X } from 'lucide-vue-next'
+import { ArrowRight, BadgeHelp, BusFront, CarFront, Check, ChevronRight, CircleAlert, Clock3, Compass, ExternalLink, GitBranch, Info, LoaderCircle, MapPin, Menu, RefreshCcw, Route, ShieldAlert, SlidersHorizontal, Sparkles, Wallet, X, ArrowUpDown } from 'lucide-vue-next'
 import { wgs84ToGcj02 } from './lib/coordinates'
-import { copyText, currentCoordinates, isNativeApp } from './lib/platform'
+import { copyText, currentCoordinates, isNativeApp, buildAmapNavigationUrl, buildAmapMarkerUrl, openAmapMarker } from './lib/platform'
 import PlaceField from './components/PlaceField.vue'
 import SmartPlanner from './components/SmartPlanner.vue'
 import MapCanvas from './components/MapCanvas.vue'
@@ -17,6 +15,7 @@ import { apiGet, apiPost, duration, detourDuration, distance, coordinates, fare,
   type Recommendation, type RecommendationResponse, type RecommendationRequest } from './lib/api'
 
 function debugPageFromLocation() {
+  if (isNativeApp) return false
   if (window.location.hash === '#/debug') return true
   if (window.location.hash === '#/user') return false
   return window.location.pathname.replace(/\/$/, '') === '/debug'
@@ -98,6 +97,11 @@ async function useCurrentLocation() {
   } finally { locating.value = false }
 }
 
+function swapDestinations() {
+  const prevDriver = driverDestination.value
+  driverDestination.value = passengerDestination.value
+  passengerDestination.value = prevDriver
+}
 function cardKey(r: Recommendation) {
   return `${r.id}:${r.suggested_mode}`
 }
@@ -245,7 +249,7 @@ onMounted(async () => {
     if (config.mode === 'demo' && !manualMode.value) await run()
   } catch {
     error.value = isNativeApp
-      ? '无法连接规划服务。请确认后端已启动、服务地址正确，并允许本地网络访问；恢复后重新打开应用。'
+      ? '网络连接不太稳定，暂时无法获取路线规划，请检查网络后重试。'
       : '无法连接后端。请先启动 FastAPI 服务，再刷新页面。'
   }
 })
@@ -257,12 +261,19 @@ onMounted(async () => {
     :shown-mode="shownMode" :proxy-ready="proxyReady" :mode="mode" :loading="loading" :elapsed="elapsed"
     :error="error" :stale="stale" :expired="expired" :can-submit="canSubmit"
     @run="run" @cancel="cancel" @pick="pick">
-    <template #navigation><a href="/debug" @click="navigatePage($event, '/debug')">开发调试</a></template>
+    <template #navigation><a v-if="!isNativeApp" href="/debug" @click="navigatePage($event, '/debug')">开发调试</a></template>
     <template #trip>
-      <PlaceField v-model="origin" kind="origin" label="共同出发地" placeholder="搜索司机与乘客的出发位置" />
+      <PlaceField v-model="origin" kind="origin" label="共同出发地" placeholder="搜索司机与乘客的出发位置" :locating="locating" @locate="useCurrentLocation" />
       <PlaceField v-model="driverDestination" kind="driver" label="司机目的地" placeholder="搜索司机目的地" />
-      <PlaceField v-model="passengerDestination" kind="passenger" label="乘客目的地" placeholder="搜索您的目的地" />
-      <button class="current-location" :disabled="locating" @click="useCurrentLocation"><MapPin :size="14" />{{ locating ? '正在定位…' : '使用当前位置' }}</button>
+      <PlaceField v-model="passengerDestination" kind="passenger" label="乘客目的地" placeholder="搜索乘客目的地" />
+      <div class="trip-quick-actions">
+        <button type="button" class="swap-destinations-btn" :disabled="!driverDestination && !passengerDestination" @click="swapDestinations">
+          <ArrowUpDown :size="14" />互换司机/乘客终点
+        </button>
+        <button type="button" class="current-location" :disabled="locating" @click="useCurrentLocation">
+          <MapPin :size="14" />{{ locating ? '定位中...' : '使用当前位置作为出发地' }}
+        </button>
+      </div>
     </template>
     <template #preferences>
         <div class="setting-row"><label for="detour">司机最多增加总时间（含停靠）</label><strong class="detour-value">{{ detour }} <small>分钟</small></strong></div>

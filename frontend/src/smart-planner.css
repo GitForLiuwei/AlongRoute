@@ -367,3 +367,180 @@
 .smart-screening-list .inspecting b { color: #92400e; background: #fef3c7; }
 .smart-ghost-toggle { display: flex; align-items: center; gap: 5px; padding: 8px 10px; border-radius: 9px; border: 1px solid #fda4af; background: #fff1f2; color: #9f1239; font-weight: 800; font-size: 12px; }
 @media(max-width:480px) { .smart-ghost-toggle { font-size: 10px; } }
+
+/* === PlaceField Recent Chips, Inline Locate & Destination Swap Upgrades === */
+.smart-planner .place-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.smart-planner .place-locate-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.smart-planner .place-locate-pill:hover:not(:disabled) {
+  background: #dbeafe;
+  border-color: #93c5fd;
+}
+
+.smart-planner .place-locate-pill:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.smart-planner .place-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.smart-planner .place-input-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.smart-planner .place-clear-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 0;
+  background: #f1f5f9;
+  color: #64748b;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.smart-planner .place-clear-btn:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.smart-planner .place-quick-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.smart-planner .quick-chip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.smart-planner .place-quick-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 128px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.smart-planner .place-quick-chip:hover {
+  border-color: #94a3b8;
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+.smart-planner .recent-suggestions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 6px 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+}
+
+.smart-planner .recent-suggestions-head span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.smart-planner .clear-recent-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 0;
+  background: none;
+  color: #94a3b8;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.smart-planner .clear-recent-btn:hover {
+  color: #dc2626;
+  background: #fef2f2;
+}
+
+.smart-planner .trip-quick-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+
+.smart-planner .swap-destinations-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.smart-planner .swap-destinations-btn:hover:not(:disabled) {
+  border-color: #059669;
+  color: #047857;
+  background: #ecfdf5;
+}
+
+.smart-planner .swap-destinations-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

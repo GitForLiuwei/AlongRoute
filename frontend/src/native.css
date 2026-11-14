@@ -1,14 +1,94 @@
-/* WKWebView draws edge to edge; keep controls clear of the notch and home bar. */
+/* WKWebView consumer iOS app styling: map-free single-column layout, safe-area aware, smooth native feel. */
 .native-ios body {
   padding-left: env(safe-area-inset-left, 0px);
   padding-right: env(safe-area-inset-right, 0px);
   padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: #f4f7f9;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
 }
+
+.native-ios input,
+.native-ios select,
+.native-ios textarea,
+.native-ios pre {
+  font-size: 16px;
+  user-select: text;
+}
+
 .native-ios .smart-header {
-  padding-top: calc(14px + env(safe-area-inset-top, 0px));
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  padding-top: calc(10px + env(safe-area-inset-top, 0px));
+  padding-bottom: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid #e2e8f0;
 }
-.native-ios .topbar {
-  height: calc(76px + env(safe-area-inset-top, 0px));
-  padding-top: env(safe-area-inset-top, 0px);
+
+.native-ios .smart-layout {
+  display: block;
+  max-width: 640px;
+  margin: 0 auto;
+  min-height: calc(100dvh - 70px);
 }
-.native-ios input, .native-ios select, .native-ios textarea { font-size: 16px; }
+
+.native-ios .smart-sidebar {
+  width: 100%;
+  max-width: 100%;
+  border-right: 0;
+  background: transparent;
+  padding-bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+}
+
+.native-ios .smart-input-section,
+.native-ios .smart-results {
+  margin: 12px 14px;
+  padding: 18px 16px;
+  background: #ffffff;
+  border-radius: 20px;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.04);
+}
+
+.native-ios .smart-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.native-ios .smart-card-actions .smart-nav-primary {
+  flex: 1 1 140px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: linear-gradient(135deg, #059669, #047857);
+  color: #ffffff;
+  border: 0;
+  border-radius: 12px;
+  padding: 11px 14px;
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow: 0 4px 12px rgba(5, 150, 105, 0.24);
+}
+
+.native-ios .smart-card-actions .smart-inline-detail-btn {
+  flex: 1 1 100%;
+  background: #f8fafc;
+  color: #334155;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.native-ios .smart-inline-details {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed #cbd5e1;
+}

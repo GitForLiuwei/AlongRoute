@@ -5,7 +5,7 @@ import { ArrowRight, Check, CheckCircle2, ChevronRight, Compass, Copy, Layers3,
   SlidersHorizontal, Sparkles, TrainFront, CarFront, Eye, EyeOff, X } from 'lucide-vue-next'
 import MapCanvas from './MapCanvas.vue'
 import { serviceUrl } from '../lib/serviceUrl'
-import { copyText, isNativeApp, shareTrip } from '../lib/platform'
+import {  copyText, isNativeApp, shareTrip , isNativeApp, openAmapNavigation, buildAmapNavigationUrl } from '../lib/platform'
 import { projectionCandidates, type CandidateEvent, type CandidateReplayResponse, type ProjectionCandidate } from '../lib/candidateProjection'
 import { apiGet, getLatestSearchId, detourDuration, distance, duration, fare, type Mode, type Place,
   type Recommendation, type RecommendationRequest, type RecommendationResponse } from '../lib/api'
@@ -79,10 +79,10 @@ function modeName(r: Recommendation) { return option(r)?.direct_walk ? '直接�
 const shownResult = computed(() => props.loading ? null : props.result)
 const shownActive = computed(() => props.loading ? null : props.active)
 function navigationUrl(r: Recommendation) {
-  const point = (p: Place) => `${p.point.lon},${p.point.lat},${encodeURIComponent(p.name)}`
-  return props.snapshot
-    ? `https://uri.amap.com/navigation?from=${point(props.snapshot.origin)}&to=${point(props.snapshot.driver_destination)}&via=${point(r.point)}&mode=car&policy=0&callnative=1`
-    : `https://uri.amap.com/marker?position=${r.point.point.lon},${r.point.point.lat}&name=${encodeURIComponent(r.point.name)}`
+  return buildAmapNavigationUrl(r.point, props.snapshot?.origin, props.snapshot?.driver_destination, false)
+}
+function startNavigation(r: Recommendation) {
+  openAmapNavigation(r.point, props.snapshot?.origin ?? props.origin, props.snapshot?.driver_destination ?? props.driverDestination)
 }
 const shareText = computed(() => {
   const r = props.active
@@ -238,17 +238,17 @@ onBeforeUnmount(() => { stopReplay(); clearTimeout(copyTimer) })
 <template>
   <div class="smart-planner bright-planner">
     <header class="smart-header">
-      <a class="smart-brand" href="/user" aria-label="顺路达首页">
+      <a class="smart-brand" href="#/user" aria-label="顺路达首页" @click.prevent>
         <span class="smart-logo"><Compass :size="29" :stroke-width="2.5" /></span>
-        <span><strong>顺路达 <b>AlongRoute</b><em>高德底图 · 实时筛点</em></strong><small>司机少绕一点路 · 乘客轻松到家</small></span>
+        <span><strong>顺路达 <b>AlongRoute</b><em v-if="!isNativeApp">高德底图 · 实时筛点</em><em v-else>智能顺路下车</em></strong><small>司机少绕一点路 · 乘客轻松到家</small></span>
       </a>
-      <div class="smart-header-end"><span class="smart-mode" :class="{ demo: mode === 'demo' }"><i />{{ mode === 'live' ? '真实路线' : '演示模式' }}</span><slot name="navigation" /></div>
+      <div v-if="!isNativeApp" class="smart-header-end"><span class="smart-mode" :class="{ demo: mode === 'demo' }"><i />{{ mode === 'live' ? '真实路线' : '演示模式' }}</span><slot name="navigation" /></div>
     </header>
 
     <main class="smart-layout">
       <aside class="smart-sidebar" aria-label="行程与推荐方案">
         <section class="smart-input-section">
-          <div class="smart-section-heading"><h1><span>1.</span> 填写双方行程</h1><button class="smart-text-button" :disabled="!result || loading || stale || expired" @click="replay"><RefreshCcw :size="16" />重播地图寻路动画</button></div>
+          <div class="smart-section-heading"><h1><span>1.</span> 填写双方行程</h1><button v-if="!isNativeApp" class="smart-text-button" :disabled="!result || loading || stale || expired" @click="replay"><RefreshCcw :size="16" />重播地图寻路动画</button></div>
           <div class="smart-places"><slot name="trip" /></div>
           <button class="smart-preferences-toggle" :aria-expanded="preferencesOpen" @click="preferencesOpen = !preferencesOpen"><SlidersHorizontal :size="14" />出行偏好<span>绕路 / 费用 / 交通方式</span><ChevronRight :size="14" :class="{ rotated: preferencesOpen }" /></button>
           <div v-show="preferencesOpen" class="smart-preferences"><slot name="preferences" /></div>
@@ -295,7 +295,7 @@ onBeforeUnmount(() => { stopReplay(); clearTimeout(copyTimer) })
         </section>
       </aside>
 
-      <section class="smart-map-panel" aria-label="路线可视化">
+      <section v-if="!isNativeApp" class="smart-map-panel" aria-label="路线可视化">
         <MapCanvas theme="bright" :candidates="screeningCandidates" :visible-candidate-count="visibleCandidateCount" :inspect-key="inspectingCandidate?.key" :removed-keys="removedKeys" :show-removed="showRemovedGhost" :search-stage="stage || (shownResult ? 4 : 0)" :result="shownResult" :active="shownActive"
           :origin="shownResult && snapshot ? snapshot.origin : origin" :driver-destination="shownResult && snapshot ? snapshot.driver_destination : driverDestination"
           :passenger-destination="shownResult && snapshot ? snapshot.passenger_destination : passengerDestination"
