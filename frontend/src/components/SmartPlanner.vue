@@ -4,6 +4,8 @@ import { ArrowRight, Check, CheckCircle2, ChevronRight, Compass, Copy, Layers3,
   LoaderCircle, MapPin, Navigation, RefreshCcw, Route, Share2, ShieldAlert,
   SlidersHorizontal, Sparkles, TrainFront, CarFront, Eye, EyeOff, X } from 'lucide-vue-next'
 import MapCanvas from './MapCanvas.vue'
+import { serviceUrl } from '../lib/serviceUrl'
+import { copyText, isNativeApp, shareTrip } from '../lib/platform'
 import { projectionCandidates, type CandidateEvent, type CandidateReplayResponse, type ProjectionCandidate } from '../lib/candidateProjection'
 import { apiGet, getLatestSearchId, detourDuration, distance, duration, fare, type Mode, type Place,
   type Recommendation, type RecommendationRequest, type RecommendationResponse } from '../lib/api'
@@ -128,6 +130,13 @@ const copyError = ref('')
 let copyTimer: ReturnType<typeof setTimeout> | undefined
 async function openShare() {
   if (!usable.value) return
+  if (isNativeApp) {
+    try { await shareTrip(shareText.value); return }
+    catch (error) {
+      if (error instanceof Error && /cancel|取消/i.test(error.message)) return
+      // If the share sheet is unavailable, offer the existing copy dialog.
+    }
+  }
   copyError.value = ''; copied.value = false
   await nextTick()
   shareDialog.value?.showModal()
@@ -136,7 +145,7 @@ function closeShare() { shareDialog.value?.close(); shareButton.value?.focus() }
 async function copyShare() {
   if (!usable.value) return
   try {
-    await navigator.clipboard.writeText(shareText.value)
+    await copyText(shareText.value)
     copied.value = true
     copyError.value = ''
     clearTimeout(copyTimer)
@@ -169,7 +178,7 @@ watch(() => [props.result, props.loading, props.stale, props.expired] as const, 
     candidateReplay.value = { search_id: liveId, finished: false, events: [] }
     if (typeof EventSource === 'undefined') return
     const seen = new Set<number>()
-    eventSource = new EventSource(`/api/search-replay/${liveId}/stream`)
+    eventSource = new EventSource(serviceUrl(`/api/search-replay/${liveId}/stream`))
     eventSource.onmessage = message => {
       if (!current || !props.loading) return
       let event: CandidateEvent

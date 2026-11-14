@@ -6,10 +6,11 @@ from time import monotonic
 
 from starlette.responses import JSONResponse
 from starlette.middleware.exceptions import ExceptionMiddleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.staticfiles import StaticFiles
 from starlette.types import Receive, Scope, Send
 
-from .main import app as api
+from .main import app as api, CORS_OPTIONS
 
 
 class ProductionApp:
@@ -20,8 +21,12 @@ class ProductionApp:
         self.release = static_dir.parent.name
         self.requests = OrderedDict()
         self.global_requests = deque()
+        self.cors = CORSMiddleware(self._serve, **CORS_OPTIONS)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        return await self.cors(scope, receive, send)
+
+    async def _serve(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] != "http":
             return await api(scope, receive, send)
         original_send = send

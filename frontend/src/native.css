@@ -1,0 +1,14 @@
+/* WKWebView draws edge to edge; keep controls clear of the notch and home bar. */
+.native-ios body {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.native-ios .smart-header {
+  padding-top: calc(14px + env(safe-area-inset-top, 0px));
+}
+.native-ios .topbar {
+  height: calc(76px + env(safe-area-inset-top, 0px));
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.native-ios input, .native-ios select, .native-ios textarea { font-size: 16px; }

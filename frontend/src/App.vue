@@ -4,6 +4,7 @@ import { ArrowRight, BadgeHelp, BusFront, CarFront, Check, ChevronRight, CircleA
   Compass, ExternalLink, GitBranch, Info, LoaderCircle, MapPin, Menu, RefreshCcw, Route,
   ShieldAlert, SlidersHorizontal, Sparkles, Wallet, X } from 'lucide-vue-next'
 import { wgs84ToGcj02 } from './lib/coordinates'
+import { copyText, currentCoordinates, isNativeApp } from './lib/platform'
 import PlaceField from './components/PlaceField.vue'
 import SmartPlanner from './components/SmartPlanner.vue'
 import MapCanvas from './components/MapCanvas.vue'
@@ -31,7 +32,9 @@ function syncPage() {
 function navigatePage(event: MouseEvent, path: '/user' | '/debug') {
   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
   event.preventDefault()
-  if (window.location.pathname !== path || window.location.hash) history.pushState(null, '', path)
+  const target = isNativeApp ? `#${path}` : path
+  const current = isNativeApp ? window.location.hash : `${window.location.pathname}${window.location.hash}`
+  if (current !== target) history.pushState(null, '', target)
   syncPage()
 }
 onMounted(() => {
@@ -83,19 +86,18 @@ function startProgress() {
   const started = Date.now()
   progressTimer = setInterval(() => { elapsed.value = (Date.now() - started) / 1000 }, 300)
 }
-function useCurrentLocation() {
+async function useCurrentLocation() {
   if (locating.value) return
-  if (!navigator.geolocation) { error.value = '当前浏览器不支持定位，请手动选择起点。'; return }
   locating.value = true
-  navigator.geolocation.getCurrentPosition(position => {
-    origin.value = { name: '当前位置', point: wgs84ToGcj02({ lon: position.coords.longitude, lat: position.coords.latitude }) }
-    locating.value = false
+  try {
+    const position = await currentCoordinates()
+    origin.value = { name: '当前位置', point: wgs84ToGcj02({ lon: position.longitude, lat: position.latitude }) }
     error.value = ''
-  }, () => {
-    locating.value = false
+  } catch {
     error.value = '无法获取当前位置，请检查定位权限，或手动选择起点。'
-  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 })
+  } finally { locating.value = false }
 }
+
 function cardKey(r: Recommendation) {
   return `${r.id}:${r.suggested_mode}`
 }
@@ -134,7 +136,7 @@ async function copyNegotiation(r: Recommendation) {
   const onward = opt.direct_walk ? '直接步行回家' : opt.mode === 'taxi' ? '打车' : '乘地铁/公交'
   const text = `【顺路下车推荐】建议在「${r.point.name}」下车，司机增加约${duration(r.driver_detour_s)}（含停靠）；我下车后${onward}，乘客全程约${duration(opt.total_duration_s ?? opt.duration_s)}，后续费用${fare(opt.fare_yuan)}。停靠条件待核实。\n司机高德导航（A→P→B）：${navigationUrl(r)}`
   try {
-    await navigator.clipboard.writeText(text)
+    await copyText(text)
     copiedCard.value = cardKey(r)
     setTimeout(() => { copiedCard.value = '' }, 2200)
   } catch { window.prompt('请复制以下协商文案：', text) }
@@ -228,7 +230,7 @@ async function copyPlace() {
   try {
     const driver = active.value.driver_route
     const driverSummary = `\n司机经停路线：${snapshot.value?.origin.name} → ${active.value.highway_exit ? `${active.value.highway_exit.name} → ` : ''}${active.value.point.name} → ${snapshot.value?.driver_destination.name}\n司机总里程：${distance(driver.distance_m)}；总耗时（含停靠）：${duration(driver.duration_s + active.value.stop_duration_s)}；增加：${duration(active.value.driver_detour_s)}\n行驶路段：\n${driver.driving_steps?.map((step, index) => `${index + 1}. ${step.road_name || '未命名道路'} ${step.instruction || step.action || ''}`).join('\n') || '未提供，请重新计算'}`
-    await navigator.clipboard.writeText(text + driverSummary)
+    await copyText(text + driverSummary)
     copied.value = true
     setTimeout(() => { copied.value = false }, 2200)
   } catch {
@@ -242,7 +244,9 @@ onMounted(async () => {
     proxyReady.value = config.map_proxy_ready
     if (config.mode === 'demo' && !manualMode.value) await run()
   } catch {
-    error.value = '无法连接后端。请先启动 FastAPI 服务，再刷新页面。'
+    error.value = isNativeApp
+      ? '无法连接规划服务。请确认后端已启动、服务地址正确，并允许本地网络访问；恢复后重新打开应用。'
+      : '无法连接后端。请先启动 FastAPI 服务，再刷新页面。'
   }
 })
 </script>

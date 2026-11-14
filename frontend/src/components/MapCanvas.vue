@@ -5,6 +5,7 @@ import { MapPinned, Layers3 } from 'lucide-vue-next'
 import type { Place, Point, Recommendation, RecommendationResponse } from '../lib/api'
 import { validGeoPoint } from '../lib/geoProjector'
 import type { ProjectionCandidate } from '../lib/candidateProjection'
+import { mapServiceHost } from '../lib/serviceUrl'
 
 const props = defineProps<{
   result: RecommendationResponse | null
@@ -99,7 +100,7 @@ async function initMap() {
   if (!container.value || !liveMap.value || disposed) { initializing = false; return }
   try {
     ;(window as any)._AMapSecurityConfig = {
-      serviceHost: `${window.location.origin}/_AMapService`,
+      serviceHost: mapServiceHost(),
     }
     let timeout: ReturnType<typeof setTimeout> | undefined
     try {

@@ -1,4 +1,5 @@
 import { beginTrace, finishTrace } from './diagnostics'
+import { serviceUrl } from './serviceUrl'
 
 export type Point = { lon: number; lat: number }
 export type Place = { name: string; point: Point; citycode?: string | null; poi_id?: string | null }
@@ -81,7 +82,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   init.signal?.addEventListener('abort', abort, { once: true })
   if (init.signal?.aborted) controller.abort()
   try {
-    const response = await fetch(path, { ...init, signal: controller.signal })
+    const response = await fetch(serviceUrl(path), { ...init, signal: controller.signal })
     trace.status = response.status
     trace.searchId = response.headers.get('X-Search-ID')
     trace.release = response.headers.get('X-AlongRoute-Release')

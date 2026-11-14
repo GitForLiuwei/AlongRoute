@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.middleware.cors import CORSMiddleware
 
 from .amap import AmapClient, MapServiceError, calculate_live
 from .demo import create_demo, demo_suggestions
@@ -19,6 +20,16 @@ from .search_log import start_trace, reset_trace, search_id, event, recommendati
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 app = FastAPI(title="顺路下车 AlongRoute API", version="0.1.0")
+
+# Packaged iOS assets use this local origin, even with a remote API server.
+CORS_OPTIONS = {
+    "allow_origins": [origin.strip() for origin in os.getenv("CORS_ALLOW_ORIGINS", "capacitor://localhost").split(",")
+                      if origin.strip()],
+    "allow_methods": ["GET", "POST"],
+    "allow_headers": ["Content-Type", "X-Search-ID"],
+    "expose_headers": ["X-Search-ID", "X-AlongRoute-Release", "X-Search-Log-Status", "Retry-After"],
+}
+app.add_middleware(CORSMiddleware, **CORS_OPTIONS)
 
 
 @app.middleware("http")

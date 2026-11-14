@@ -12,3 +12,8 @@ dist/
 .vscode/
 .runtime/
 *.bak
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.ipa
+*.xcarchive/
