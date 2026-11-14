@@ -14,9 +14,8 @@ if ! xcodebuild -version; then
   echo '请先安装并打开完整 Xcode，完成初次安装和许可确认，再重新运行。'
   exit 1
 fi
-[[ -f frontend/.env.ios.local ]] || cp frontend/.env.ios.example frontend/.env.ios.local
 npm --prefix frontend ci
-echo '正在生成 iOS 应用并打开 Xcode。默认连接 Mac 的 http://localhost:8000。'
-echo '请另行运行 start-backend-macos.command 启动本地规划服务。'
-echo '真机运行前，请修改 frontend/.env.ios.local 中的服务地址为 Mac 的局域网 IP，并重新运行本脚本。'
+echo '正在生成 iOS 应用并打开 Xcode，实际配置文件和后端地址如下。'
+echo 'Mac 配置保存在用户目录中，更新或替换源码后会继续使用。'
+echo '连接 Mac 本地后端时，请另行运行 start-backend-macos.command；连接远程服务器时无需启动。'
 npm --prefix frontend run ios:open

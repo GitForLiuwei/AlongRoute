@@ -24,12 +24,15 @@ bash start-backend-macos.command
 
 ### 连接已部署的 Linux 后端
 
-手机可以直接连接服务器，Mac 不需要一直运行本地 FastAPI。先创建并编辑配置：
+手机可以直接连接服务器，Mac 不需要一直运行本地 FastAPI。先安装依赖并初始化 Mac 用户配置，再打开配置文件：
 
 ```bash
-cp -n frontend/.env.ios.example frontend/.env.ios.local
-open -e frontend/.env.ios.local
+npm --prefix frontend ci
+npm --prefix frontend run ios:config
+open -e "$HOME/Library/Application Support/AlongRoute/.env.ios.local"
 ```
+
+这个配置保存在源码目录之外，`git pull`、重新下载源码或替换项目文件夹后仍可复用。首次初始化会迁移已有 `frontend/.env.ios.local`，没有旧配置时才复制模板；以后不会自动覆盖。已有用户配置时，请直接修改该文件。优先级为：终端显式设置的 `VITE_` 变量 → Mac 用户配置 → 项目内环境配置。
 
 将 `VITE_API_BASE_URL` 设置为服务器根地址，不带 `/api`，同时在同一个文件填写 `VITE_AMAP_JS_KEY`：
 
@@ -52,9 +55,9 @@ VITE_AMAP_JS_KEY=你的高德Web端JS_API_Key
 bash setup-ios.command
 ```
 
-脚本检查 Mac / Node / Xcode、安装 npm 锁定依赖、创建 `frontend/.env.ios.local`，构建网页资源，同步 iOS 插件并打开 Xcode。
+脚本检查 Mac / Node / Xcode、安装 npm 锁定依赖、初始化或读取 `~/Library/Application Support/AlongRoute/.env.ios.local`，构建网页资源，同步 iOS 插件并打开 Xcode。终端显示实际配置文件和后端地址，不输出地图 Key。
 
-默认服务地址为 `http://localhost:8000`，用于 **Mac 上的 iOS 模拟器**。在 Xcode 顶部选择 **App** scheme 和一个 iPhone 模拟器，点击 ▶ 或按 **⌘R**。不需要设置 Apple 签名团队即可运行模拟器。
+没有旧配置时，初始服务地址为 `http://localhost:8000`，用于 **Mac 上的 iOS 模拟器**。在 Xcode 顶部选择 **App** scheme 和一个 iPhone 模拟器，点击 ▶ 或按 **⌘R**。不需要设置 Apple 签名团队即可运行模拟器。
 
 若出现 Xcode 命令行工具目录错误，安装完整 Xcode 后执行：
 
@@ -96,7 +99,7 @@ NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem bash setup-ios.command
 以下第 1–2 步用于连接 Mac 本地后端。连接服务器时，使用上文的服务器配置，然后从第 3 步继续。
 
 1. iPhone 和 Mac 连接同一局域网；从 Mac 系统设置 → Wi-Fi → 详细信息 → TCP/IP 获取 Mac 的 IP。
-2. 修改 `frontend/.env.ios.local`：
+2. 修改 `~/Library/Application Support/AlongRoute/.env.ios.local`（如尚未创建，先运行 `npm --prefix frontend run ios:config`）：
 
    ```dotenv
    VITE_API_BASE_URL=http://192.168.1.10:8000
@@ -119,8 +122,9 @@ NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem bash setup-ios.command
 # 仅首次或依赖变化后
 npm --prefix frontend ci
 
-# 首次手动配置（setup-ios.command 已自动处理；已有文件请保留）
-cp -n frontend/.env.ios.example frontend/.env.ios.local
+# Mac 首次初始化用户配置（setup-ios.command 也会自动处理；不会覆盖已有配置）
+npm --prefix frontend run ios:config
+open -e "$HOME/Library/Application Support/AlongRoute/.env.ios.local"
 
 # 重新构建 iOS 资源并同步到原生工程
 npm --prefix frontend run ios:sync
@@ -131,12 +135,12 @@ npm --prefix frontend run ios:open
 
 工程位于 `frontend/ios/App/App.xcodeproj`。`ios:sync` 也可在 Linux 上生成资源和插件配置，但编译、模拟器运行、签名和导出 IPA 必须使用 Mac / Xcode。
 
-浏览器开发继续使用 `npm --prefix frontend run dev`，默认走 Vite 同源代理。iOS 构建额外加载 `.env.ios.local`，将 API、SSE 和 `/_AMapService` 统一指向配置的后端。不要在 `VITE_` 变量中放置 Web 服务 Key 或 JS 安全密钥。
+浏览器开发继续使用 `npm --prefix frontend run dev`，默认走 Vite 同源代理。Mac iOS 构建优先读取用户目录配置，Linux 仍使用 `frontend/.env.ios.local`（可从模板手动复制）。API、SSE 和 `/_AMapService` 统一指向配置的后端。不要在 `VITE_` 变量中放置 Web 服务 Key 或 JS 安全密钥。
 
 ## 6. 地图与打包说明
 
-- 需要申请 **Web端（JS API）Key** 并填入 `frontend/.env.ios.local` 的 `VITE_AMAP_JS_KEY`。高德「iOS 平台」Key 仅用于原生高德 SDK，本工程尚未接入，不能填到现有 JS Key 字段。Web服务 Key 和 JS 安全密钥分别填写后端的 `AMAP_WEB_SERVICE_KEY`、`AMAP_JS_SECURITY_CODE`。
-- `.env.ios.local` 会覆盖通用 `.env.local` 的同名配置，包括空值。手机出现「尚未配置高德地图」说明安装包中的 JS Key 为空；检查 iOS 专用配置，再执行 `npm --prefix frontend run ios:sync` 并按 ⌘R 重新安装。
+- 需要申请 **Web端（JS API）Key** 并填入 Mac 用户配置的 `VITE_AMAP_JS_KEY`。高德「iOS 平台」Key 仅用于原生高德 SDK，本工程尚未接入，不能填到现有 JS Key 字段。Web服务 Key 和 JS 安全密钥分别填写后端的 `AMAP_WEB_SERVICE_KEY`、`AMAP_JS_SECURITY_CODE`。
+- Mac 用户配置会覆盖项目内 `.env.ios.local` 和 `.env.local` 的同名配置，包括空值。手机出现「尚未配置高德地图」说明安装包中的 JS Key 为空；检查 iOS 专用配置，再执行 `npm --prefix frontend run ios:sync` 并按 ⌘R 重新安装。
 - 高德底图仍使用 Web JS SDK，需要有效的 JS Key、后端安全代理，以及允许对应 WebView 来源的高德 Key 配置。应用页面来源为 `capacitor://localhost`。若高德控制台拒绝这一来源，需要根据高德当前政策调整 Key 授权或后续改用原生地图 SDK；需在真机验证地图、导航跳转和真实路线。
 - 后端默认只允许 iOS 来源 `capacitor://localhost` 跨域访问。自定义 hostname 时同步调整 `CORS_ALLOW_ORIGINS` 并重启服务。外置反向代理需转发 CORS 预检并允许 SSE 长连接。
 - Debug 构建使用 `Info-Debug.plist`，允许 WebView 通过 HTTP 访问局域网服务；Release 使用 `Info.plist`，保留系统传输安全限制。**正式分发前将 `VITE_API_BASE_URL` 换成 HTTPS 服务地址，重新 `ios:sync` 后再 Archive。**

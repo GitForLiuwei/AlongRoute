@@ -5,7 +5,7 @@ import { ArrowRight, Check, CheckCircle2, ChevronRight, Compass, Copy, Layers3,
   SlidersHorizontal, Sparkles, TrainFront, CarFront, Eye, EyeOff, X } from 'lucide-vue-next'
 import MapCanvas from './MapCanvas.vue'
 import { serviceUrl } from '../lib/serviceUrl'
-import {  copyText, isNativeApp, shareTrip , isNativeApp, openAmapNavigation, buildAmapNavigationUrl } from '../lib/platform'
+import { copyText, isNativeApp, shareTrip, openAmapNavigation, buildAmapNavigationUrl } from '../lib/platform'
 import { projectionCandidates, type CandidateEvent, type CandidateReplayResponse, type ProjectionCandidate } from '../lib/candidateProjection'
 import { apiGet, getLatestSearchId, detourDuration, distance, duration, fare, type Mode, type Place,
   type Recommendation, type RecommendationRequest, type RecommendationResponse } from '../lib/api'

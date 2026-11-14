@@ -32,8 +32,10 @@ export async function shareTrip(text: string): Promise<void> {
 }
 
 /**
- * 构建高德地图导航 URL：在 iOS 原生端返回 `iosamap://path` URI Scheme（含途经点 P），
- * 在 Web 端返回 `https://uri.amap.com/navigation`。
+ * 构建高德地图导航 URL：
+ * - 在 iOS 原生端返回纯原生 `iosamap://path` URI Scheme（含起点 A、途经下车点 P、司机终点 B），
+ *   由 Capacitor WKWebView 的 WebViewDelegationHandler 直接调用 UIApplication.shared.open 唤起高德地图 App；
+ * - 在桌面/普通浏览器端返回 Web URI。
  */
 export function buildAmapNavigationUrl(
   dropoff: GeoPointLike,
@@ -82,40 +84,29 @@ export function buildAmapMarkerUrl(place: GeoPointLike, preferNativeScheme: bool
 }
 
 /**
- * 在 iOS 端直接拉起高德地图 App 进行路线导航；若设备未安装高德地图 App 则自动回退打开 Web 导航页。
+ * 在 iOS 端直接通过 `iosamap://` 原生协议拉起高德地图 App，不跳转网页版高德导航。
+ * (Capacitor 的 WebViewDelegationHandler 会拦截顶层 iosamap:// 导航并直接执行 UIApplication.shared.open)
  */
 export function openAmapNavigation(
   dropoff: GeoPointLike,
   origin?: GeoPointLike | null,
   driverDestination?: GeoPointLike | null,
 ): void {
-  const webUrl = buildAmapNavigationUrl(dropoff, origin, driverDestination, false)
-  if (!isNativeApp) {
-    window.open(webUrl, '_blank', 'noopener,noreferrer')
+  if (isNativeApp) {
+    const schemeUrl = buildAmapNavigationUrl(dropoff, origin, driverDestination, true)
+    window.location.assign(schemeUrl)
     return
   }
-  const schemeUrl = buildAmapNavigationUrl(dropoff, origin, driverDestination, true)
-  const startedAt = Date.now()
-  window.location.href = schemeUrl
-  setTimeout(() => {
-    if (!document.hidden && Date.now() - startedAt < 2200) {
-      window.open(webUrl, '_blank', 'noopener,noreferrer')
-    }
-  }, 1500)
+  const webUrl = buildAmapNavigationUrl(dropoff, origin, driverDestination, false)
+  window.open(webUrl, '_blank', 'noopener,noreferrer')
 }
 
 export function openAmapMarker(place: GeoPointLike): void {
-  const webUrl = buildAmapMarkerUrl(place, false)
-  if (!isNativeApp) {
-    window.open(webUrl, '_blank', 'noopener,noreferrer')
+  if (isNativeApp) {
+    const schemeUrl = buildAmapMarkerUrl(place, true)
+    window.location.assign(schemeUrl)
     return
   }
-  const schemeUrl = buildAmapMarkerUrl(place, true)
-  const startedAt = Date.now()
-  window.location.href = schemeUrl
-  setTimeout(() => {
-    if (!document.hidden && Date.now() - startedAt < 2200) {
-      window.open(webUrl, '_blank', 'noopener,noreferrer')
-    }
-  }, 1500)
+  const webUrl = buildAmapMarkerUrl(place, false)
+  window.open(webUrl, '_blank', 'noopener,noreferrer')
 }
